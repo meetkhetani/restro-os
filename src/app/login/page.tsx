@@ -46,7 +46,6 @@ export default function LoginPage() {
         router.push("/dashboard");
       }
     } catch {
-      // In dev without active live Supabase backend, simulate demo sign-in
       addToast({
         type: "info",
         title: "Demo Mode Enabled",
@@ -61,7 +60,6 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-md space-y-6">
-        {/* Brand Header */}
         <div className="text-center space-y-2">
           <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-brand-500 text-white shadow-card">
             <UtensilsCrossed className="h-6 w-6" />
@@ -74,7 +72,6 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {/* Login Card */}
         <Card className="bg-surface shadow-dialog border-restro-200">
           <CardHeader className="space-y-1">
             <CardTitle className="text-lg">Sign In</CardTitle>
