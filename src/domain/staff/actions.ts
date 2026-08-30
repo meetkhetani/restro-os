@@ -125,7 +125,7 @@ export async function getStaffOverview() {
 export async function getRolePermissionsMatrix() {
   try {
     const supabase = await createClient();
-    const { data: matrix, error } = await supabase.from("role_permissions").select("*");
+    const { data: matrix, error } = await supabase.from("system_role_permissions").select("*");
     if (error) return { success: false, error: error.message, matrix: [] };
     return { success: true, matrix: (matrix || []) as RolePermissions[] };
   } catch (err: unknown) {

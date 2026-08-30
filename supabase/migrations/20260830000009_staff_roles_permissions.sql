@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS public.branch_memberships (
   UNIQUE(branch_id, user_id)
 );
 
--- 3. ROLE PERMISSIONS MATRIX TABLE
-CREATE TABLE IF NOT EXISTS public.role_permissions (
+-- 3. SYSTEM ROLE PERMISSIONS MATRIX TABLE
+CREATE TABLE IF NOT EXISTS public.system_role_permissions (
   role TEXT PRIMARY KEY CHECK (role IN ('owner', 'manager', 'cashier', 'kitchen', 'waiter', 'inventory_manager')),
   pos_access BOOLEAN NOT NULL DEFAULT FALSE,
   kds_access BOOLEAN NOT NULL DEFAULT FALSE,
@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS public.role_permissions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Seed Default Role Permissions Matrix
-INSERT INTO public.role_permissions (role, pos_access, kds_access, menu_management, inventory_control, purchasing_control, crm_access, billing_access, reports_access)
+-- Seed Default System Role Permissions Matrix
+INSERT INTO public.system_role_permissions (role, pos_access, kds_access, menu_management, inventory_control, purchasing_control, crm_access, billing_access, reports_access)
 VALUES
   ('owner',             true, true, true, true, true, true, true, true),
   ('manager',           true, true, true, true, true, true, false, true),
@@ -76,7 +76,7 @@ ON CONFLICT (role) DO UPDATE SET
 
 -- 4. RLS SECURITY POLICIES
 ALTER TABLE public.branch_memberships ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.role_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.system_role_permissions ENABLE ROW LEVEL SECURITY;
 
 DO $$
 BEGIN
@@ -85,8 +85,8 @@ BEGIN
       FOR ALL USING (org_id IN (SELECT org_id FROM public.memberships WHERE user_id = auth.uid()));
   END IF;
 
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'role_permissions_read_policy') THEN
-    CREATE POLICY role_permissions_read_policy ON public.role_permissions
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'system_role_permissions_read_policy') THEN
+    CREATE POLICY system_role_permissions_read_policy ON public.system_role_permissions
       FOR SELECT USING (true);
   END IF;
 END $$;
