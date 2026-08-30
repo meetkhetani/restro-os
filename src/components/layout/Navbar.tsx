@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { LogOut, User, Bell, HelpCircle, Search, Command } from "lucide-react";
+import { LogOut, User, HelpCircle, Search, Command } from "lucide-react";
+import { NotificationBellDropdown } from "@/components/notifications/NotificationBellDropdown";
 import { OrgSwitcher } from "./OrgSwitcher";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { GlobalSearchModal } from "./GlobalSearchModal";
@@ -106,10 +107,8 @@ export function Navbar({
             </kbd>
           </button>
 
-          <button className="relative p-2 rounded-md text-restro-500 hover:bg-restro-100 hover:text-restro-900 transition-colors">
-            <Bell className="h-4 w-4" />
-            <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-brand-500 ring-2 ring-white" />
-          </button>
+          {/* Live Notification Bell Dropdown */}
+          <NotificationBellDropdown />
 
           <div className="h-4 w-px bg-restro-200 mx-1 hidden sm:block" />
 
