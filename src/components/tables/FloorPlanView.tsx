@@ -37,22 +37,25 @@ interface FloorPlanViewProps {
 }
 
 export function FloorPlanView({
-  floors,
-  tables,
+  floors = [],
+  tables = [],
   onRefresh,
 }: FloorPlanViewProps) {
   const { addToast } = useToast();
 
+  const safeFloors = React.useMemo(() => floors || [], [floors]);
+  const safeTables = React.useMemo(() => tables || [], [tables]);
+
   const [activeFloorId, setActiveFloorId] = React.useState<string>(
-    floors[0]?.id || ""
+    safeFloors[0]?.id || ""
   );
 
   // Synchronize active floor ID when floors update
   React.useEffect(() => {
-    if (floors.length > 0 && (!activeFloorId || !floors.some((f) => f.id === activeFloorId))) {
-      setActiveFloorId(floors[0].id);
+    if (safeFloors.length > 0 && (!activeFloorId || !safeFloors.some((f) => f.id === activeFloorId))) {
+      setActiveFloorId(safeFloors[0].id);
     }
-  }, [floors, activeFloorId]);
+  }, [safeFloors, activeFloorId]);
 
   // Selected Table & Modals State
   const [selectedTable, setSelectedTable] = React.useState<TableItemExtended | null>(null);
@@ -76,13 +79,13 @@ export function FloorPlanView({
   }, [activeFloorId]);
 
   const activeFloor = React.useMemo(() => {
-    return floors.find((f) => f.id === activeFloorId) || floors[0];
-  }, [floors, activeFloorId]);
+    return safeFloors.find((f) => f.id === activeFloorId) || safeFloors[0];
+  }, [safeFloors, activeFloorId]);
 
   const filteredTables = React.useMemo(() => {
-    if (!activeFloorId) return tables;
-    return tables.filter((t) => t.floor_id === activeFloorId);
-  }, [tables, activeFloorId]);
+    if (!activeFloorId) return safeTables;
+    return safeTables.filter((t) => t.floor_id === activeFloorId || t.floor_area === activeFloor?.name);
+  }, [safeTables, activeFloorId, activeFloor]);
 
   const handleStatusChange = async (tableId: string, status: TableStatus) => {
     const res = await updateTableStatus(tableId, status);
@@ -296,7 +299,7 @@ export function FloorPlanView({
       {/* Floor Selection Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-200 pb-4">
         <div className="flex items-center gap-2 overflow-x-auto">
-          {floors.map((floor) => (
+          {safeFloors.map((floor) => (
             <button
               key={floor.id}
               onClick={() => setActiveFloorId(floor.id)}
@@ -589,7 +592,7 @@ export function FloorPlanView({
                   onChange={(e) => setTargetFloorId(e.target.value)}
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
                 >
-                  {floors.map((f) => (
+                  {safeFloors.map((f) => (
                     <option key={f.id} value={f.id}>
                       {f.name}
                     </option>

@@ -137,17 +137,50 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
       .order("reservation_time", { ascending: true }),
   ]);
 
-  const floors = (floorsRes.data || []) as Floor[];
-  const rawTables = tablesRes.data || [];
+  let floors = (floorsRes.data || []) as Floor[];
+  if (floorsRes.error || floors.length === 0) {
+    floors = [
+      {
+        id: "default-main-floor",
+        org_id: orgId,
+        branch_id: branchId,
+        name: "Main Floor",
+        sort_order: 0,
+        status: "active",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+  }
+
+  let rawTables = tablesRes.data || [];
+  if (tablesRes.error || !tablesRes.data) {
+    const fallbackTables = await supabase
+      .from("tables")
+      .select("*")
+      .eq("org_id", orgId)
+      .order("table_number", { ascending: true });
+    rawTables = fallbackTables.data || [];
+  }
+
+  let reservations = (reservationsRes.data || []) as Reservation[];
+  if (reservationsRes.error || !reservationsRes.data) {
+    const fallbackRes = await supabase
+      .from("reservations")
+      .select("*")
+      .eq("org_id", orgId)
+      .order("reservation_time", { ascending: true });
+    reservations = (fallbackRes.data || []) as Reservation[];
+  }
+
   const activeOrders = (activeOrdersRes.data || []) as Order[];
-  const reservations = (reservationsRes.data || []) as Reservation[];
 
   const tables: TableItemExtended[] = rawTables.map((tbl) => {
     const activeOrder = activeOrders.find((o) => o.table_id === tbl.id) || null;
     return {
       ...tbl,
-      capacity: Number(tbl.capacity),
-      floor_area: tbl.floor?.name || tbl.section || "Main Floor",
+      capacity: Number(tbl.capacity || 4),
+      floor_area: tbl.floor?.name || tbl.section || tbl.floor_area || "Main Floor",
       pos_x: Number(tbl.pos_x || 0),
       pos_y: Number(tbl.pos_y || 0),
       shape: tbl.shape || "square",
