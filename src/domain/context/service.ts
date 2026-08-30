@@ -1,19 +1,32 @@
 "use server";
 
+import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentPlan, canAccess } from "../entitlements/service";
 import { BranchOption } from "./types";
 import { Organization, Location } from "../types";
 
-export async function resolveUserContext(orgIdParam?: string, branchIdParam?: string) {
+/**
+ * High-performance memoized context resolver.
+ * Parallelizes independent database queries to eliminate waterfalls.
+ */
+export const resolveUserContext = cache(async function (
+  orgIdParam?: string,
+  branchIdParam?: string
+) {
   const supabase = await createClient();
 
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
   if (authError || !user) {
     return {
       authenticated: false,
       user: null,
       org: null,
+      orgs: [],
       branches: [],
       selectedBranch: null,
       plan: null,
@@ -21,21 +34,20 @@ export async function resolveUserContext(orgIdParam?: string, branchIdParam?: st
     };
   }
 
-  // 1. Fetch User Profile
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
+  // 1. Parallel execution of Profile & Memberships queries
+  const [profileRes, membershipsRes] = await Promise.all([
+    supabase.from("profiles").select("*").eq("id", user.id).single(),
+    supabase
+      .from("memberships")
+      .select("*, organization:organizations(*), role:roles(*)")
+      .eq("user_id", user.id)
+      .eq("status", "active"),
+  ]);
 
-  // 2. Fetch User Organizations & Active Memberships
-  const { data: memberships } = await supabase
-    .from("memberships")
-    .select("*, organization:organizations(*), role:roles(*)")
-    .eq("user_id", user.id)
-    .eq("status", "active");
+  const profile = profileRes.data;
+  const memberships = membershipsRes.data || [];
 
-  const orgs = (memberships || []).map((m) => m.organization as Organization).filter(Boolean);
+  const orgs = memberships.map((m) => m.organization as Organization).filter(Boolean);
   const activeOrg = orgs.find((o) => o.id === orgIdParam) || orgs[0] || {
     id: "demo-org-1",
     name: "Grand Restro Group",
@@ -44,17 +56,14 @@ export async function resolveUserContext(orgIdParam?: string, branchIdParam?: st
     updated_at: new Date().toISOString(),
   };
 
-  // 3. Resolve Active Plan & Entitlements
-  const plan = await getCurrentPlan(activeOrg.id);
-  const isMultiBranchEntitled = await canAccess(activeOrg.id, "analytics.cross_branch");
+  // 2. Parallel execution of Plan, Entitlement, and Restaurants queries
+  const [plan, isMultiBranchEntitled, restaurantsRes] = await Promise.all([
+    getCurrentPlan(activeOrg.id),
+    canAccess(activeOrg.id, "analytics.cross_branch"),
+    supabase.from("restaurants").select("id").eq("org_id", activeOrg.id),
+  ]);
 
-  // 4. Fetch Locations for Organization
-  const { data: restaurants } = await supabase
-    .from("restaurants")
-    .select("id")
-    .eq("org_id", activeOrg.id);
-
-  const restaurantIds = (restaurants || []).map((r) => r.id);
+  const restaurantIds = (restaurantsRes.data || []).map((r) => r.id);
 
   let rawLocations: Location[] = [];
   if (restaurantIds.length > 0) {
@@ -89,10 +98,9 @@ export async function resolveUserContext(orgIdParam?: string, branchIdParam?: st
     ];
   }
 
-  // 5. Construct Available Branch Options
+  // 3. Construct Available Branch Options
   const availableBranches: BranchOption[] = [];
 
-  // If Multi-Branch plan entitled, add 'All Branches' option
   if (isMultiBranchEntitled) {
     availableBranches.push({
       id: "all",
@@ -115,7 +123,6 @@ export async function resolveUserContext(orgIdParam?: string, branchIdParam?: st
     selectedBranch = availableBranches[0];
   }
 
-  // Security Check: If user tries to select 'all' without Multi-Branch entitlement, fallback to 1st branch
   if (selectedBranch?.id === "all" && !isMultiBranchEntitled) {
     selectedBranch = availableBranches.find((b) => !b.isAll) || availableBranches[0];
   }
@@ -130,4 +137,4 @@ export async function resolveUserContext(orgIdParam?: string, branchIdParam?: st
     plan,
     isMultiBranchEntitled,
   };
-}
+});

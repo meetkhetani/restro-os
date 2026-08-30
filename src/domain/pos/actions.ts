@@ -36,48 +36,53 @@ export async function getPosInitialData() {
   const orgId = context.org.id;
   const locationId = context.selectedBranch.id;
 
-  // 1. Fetch Categories
-  const { data: categories } = await supabase
-    .from("categories")
-    .select("*")
-    .eq("org_id", orgId)
-    .order("display_order", { ascending: true });
+  // Execute all POS queries concurrently using Promise.all to eliminate sequential network roundtrips
+  const [categoriesRes, menuItemsRes, modifierGroupsRes, tablesRes, customersRes] =
+    await Promise.all([
+      supabase
+        .from("categories")
+        .select("*")
+        .eq("org_id", orgId)
+        .order("display_order", { ascending: true }),
 
-  // 2. Fetch Menu Items
-  const { data: menuItems } = await supabase
-    .from("menu_items")
-    .select("*")
-    .eq("org_id", orgId)
-    .eq("is_available", true);
+      supabase
+        .from("menu_items")
+        .select("*")
+        .eq("org_id", orgId)
+        .eq("is_available", true),
 
-  // 3. Fetch Modifier Groups & Options
-  const { data: modifierGroups } = await supabase
-    .from("modifier_groups")
-    .select("*, options:modifier_options(*)")
-    .eq("org_id", orgId);
+      supabase
+        .from("modifier_groups")
+        .select("*, options:modifier_options(*)")
+        .eq("org_id", orgId),
+
+      supabase
+        .from("tables")
+        .select("*")
+        .eq("org_id", orgId)
+        .eq("location_id", locationId)
+        .order("table_number", { ascending: true }),
+
+      supabase
+        .from("customers")
+        .select("*")
+        .eq("org_id", orgId)
+        .order("name", { ascending: true }),
+    ]);
+
+  const categories = categoriesRes.data || [];
+  const menuItems = menuItemsRes.data || [];
+  const modifierGroups = modifierGroupsRes.data || [];
+  const tables = tablesRes.data || [];
+  const customers = customersRes.data || [];
 
   // Attach modifier groups to menu items
-  const formattedItems: MenuItem[] = (menuItems || []).map((item) => ({
+  const formattedItems: MenuItem[] = menuItems.map((item) => ({
     ...item,
     price: Number(item.price),
     tax_rate: Number(item.tax_rate),
     modifier_groups: modifierGroups || [],
   }));
-
-  // 4. Fetch Floor Tables
-  const { data: tables } = await supabase
-    .from("tables")
-    .select("*")
-    .eq("org_id", orgId)
-    .eq("location_id", locationId)
-    .order("table_number", { ascending: true });
-
-  // 5. Fetch Customers
-  const { data: customers } = await supabase
-    .from("customers")
-    .select("*")
-    .eq("org_id", orgId)
-    .order("name", { ascending: true });
 
   return {
     categories: (categories || []) as Category[],
