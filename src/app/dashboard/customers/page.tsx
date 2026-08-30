@@ -1,13 +1,17 @@
-import { Users } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getCustomersOverview } from "@/domain/customers/actions";
+import { CustomersPageClient } from "@/components/customers/CustomersPageClient";
 
-export default function CustomersPage() {
+export default async function CustomersPage() {
+  const context = await resolveUserContext();
+  const branchName = context.selectedBranch?.name || "Main Branch";
+
+  const res = await getCustomersOverview();
+
   return (
-    <ModuleShell
-      title="Customer CRM & Loyalty Database"
-      category="CRM"
-      description="Guest profiles, dining history, preferences, and reward points."
-      icon={<Users className="h-5 w-5" />}
+    <CustomersPageClient
+      initialCustomers={res.customers || []}
+      branchName={branchName}
     />
   );
 }
