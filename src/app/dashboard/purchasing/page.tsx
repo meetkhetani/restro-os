@@ -1,13 +1,20 @@
-import { Truck } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getPurchasingOverview } from "@/domain/purchasing/actions";
+import { PurchasingPageClient } from "@/components/purchasing/PurchasingPageClient";
 
-export default function PurchasingPage() {
+export default async function PurchasingPage() {
+  const context = await resolveUserContext();
+  const branchId = context.selectedBranch?.id || "";
+  const branchName = context.selectedBranch?.name || "Main Branch";
+
+  const res = await getPurchasingOverview(branchId);
+
   return (
-    <ModuleShell
-      title="Purchasing & Vendor Management"
-      category="Management"
-      description="Purchase orders, supplier contracts, and receiving logs."
-      icon={<Truck className="h-5 w-5" />}
+    <PurchasingPageClient
+      initialSuppliers={res.suppliers || []}
+      initialPurchaseOrders={res.purchaseOrders || []}
+      currentBranchId={branchId}
+      branchName={branchName}
     />
   );
 }
