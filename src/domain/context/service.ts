@@ -6,9 +6,135 @@ import { getCurrentPlan, canAccess } from "../entitlements/service";
 import { BranchOption } from "./types";
 import { Organization, Location } from "../types";
 
+const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
+const DEFAULT_LOC_1_ID = "00000000-0000-0000-0000-000000000101";
+const DEFAULT_LOC_2_ID = "00000000-0000-0000-0000-000000000102";
+
+/**
+ * Ensures default organization and location records exist in Supabase DB with valid UUIDs.
+ * Prevents invalid UUID format errors and Foreign Key constraint violations.
+ */
+async function ensureValidTenantContext(
+  supabase: ReturnType<typeof createClient> extends Promise<infer T> ? T : never,
+  user: { id: string },
+  orgIdParam?: string
+) {
+  // 1. Check existing memberships & orgs
+  const { data: memberships } = await supabase
+    .from("memberships")
+    .select("*, organization:organizations(*), role:roles(*)")
+    .eq("user_id", user.id)
+    .eq("status", "active");
+
+  const orgs = (memberships || [])
+    .map((m) => m.organization as Organization)
+    .filter(Boolean);
+
+  let activeOrg = orgs.find((o) => o.id === orgIdParam) || orgs[0];
+
+  // If no org found, check database organizations table
+  if (!activeOrg) {
+    const { data: dbOrgs } = await supabase
+      .from("organizations")
+      .select("*")
+      .limit(1);
+
+    if (dbOrgs && dbOrgs.length > 0) {
+      activeOrg = dbOrgs[0] as Organization;
+    } else {
+      // Auto-insert default organization into DB
+      const { data: insertedOrg } = await supabase
+        .from("organizations")
+        .insert({
+          id: DEFAULT_ORG_ID,
+          name: "Grand Restro Group",
+          slug: "grand-restro",
+        })
+        .select()
+        .single();
+
+      activeOrg = (insertedOrg as Organization) || {
+        id: DEFAULT_ORG_ID,
+        name: "Grand Restro Group",
+        slug: "grand-restro",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+    }
+  }
+
+  // 2. Fetch or create restaurants & locations
+  const { data: restaurants } = await supabase
+    .from("restaurants")
+    .select("id")
+    .eq("org_id", activeOrg.id);
+
+  let restaurantIds = (restaurants || []).map((r) => r.id);
+
+  if (restaurantIds.length === 0) {
+    const { data: insertedRest } = await supabase
+      .from("restaurants")
+      .insert({
+        org_id: activeOrg.id,
+        name: activeOrg.name,
+      })
+      .select("id")
+      .single();
+
+    if (insertedRest) {
+      restaurantIds = [insertedRest.id];
+    }
+  }
+
+  let rawLocations: Location[] = [];
+  if (restaurantIds.length > 0) {
+    const { data: locs } = await supabase
+      .from("locations")
+      .select("*")
+      .in("restaurant_id", restaurantIds);
+    rawLocations = (locs || []) as Location[];
+  }
+
+  // If no location exists in DB, auto-insert default location into locations table
+  if (rawLocations.length === 0) {
+    const { data: insertedLoc } = await supabase
+      .from("locations")
+      .insert({
+        id: DEFAULT_LOC_1_ID,
+        restaurant_id: restaurantIds[0] || activeOrg.id,
+        name: "Downtown Main Branch",
+        timezone: "America/New_York",
+        status: "active",
+      })
+      .select()
+      .single();
+
+    if (insertedLoc) {
+      rawLocations = [insertedLoc as Location];
+    } else {
+      rawLocations = [
+        {
+          id: DEFAULT_LOC_1_ID,
+          restaurant_id: restaurantIds[0] || activeOrg.id,
+          name: "Downtown Main Branch",
+          timezone: "America/New_York",
+          status: "active",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ];
+    }
+  }
+
+  return {
+    orgs: orgs.length > 0 ? orgs : [activeOrg],
+    activeOrg,
+    rawLocations,
+  };
+}
+
 /**
  * High-performance memoized context resolver.
- * Parallelizes independent database queries to eliminate waterfalls.
  */
 export const resolveUserContext = cache(async function (
   orgIdParam?: string,
@@ -34,71 +160,27 @@ export const resolveUserContext = cache(async function (
     };
   }
 
-  // 1. Parallel execution of Profile & Memberships queries
-  const [profileRes, membershipsRes] = await Promise.all([
-    supabase.from("profiles").select("*").eq("id", user.id).single(),
-    supabase
-      .from("memberships")
-      .select("*, organization:organizations(*), role:roles(*)")
-      .eq("user_id", user.id)
-      .eq("status", "active"),
-  ]);
+  // 1. Fetch Profile
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("id", user.id)
+    .single();
 
-  const profile = profileRes.data;
-  const memberships = membershipsRes.data || [];
+  // 2. Ensure Valid Tenant Org & Location Structure in DB
+  const { orgs, activeOrg, rawLocations } = await ensureValidTenantContext(
+    supabase,
+    user,
+    orgIdParam
+  );
 
-  const orgs = memberships.map((m) => m.organization as Organization).filter(Boolean);
-  const activeOrg = orgs.find((o) => o.id === orgIdParam) || orgs[0] || {
-    id: "demo-org-1",
-    name: "Grand Restro Group",
-    slug: "grand-restro",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-
-  // 2. Parallel execution of Plan, Entitlement, and Restaurants queries
-  const [plan, isMultiBranchEntitled, restaurantsRes] = await Promise.all([
+  // 3. Resolve Plan & Entitlements
+  const [plan, isMultiBranchEntitled] = await Promise.all([
     getCurrentPlan(activeOrg.id),
     canAccess(activeOrg.id, "analytics.cross_branch"),
-    supabase.from("restaurants").select("id").eq("org_id", activeOrg.id),
   ]);
 
-  const restaurantIds = (restaurantsRes.data || []).map((r) => r.id);
-
-  let rawLocations: Location[] = [];
-  if (restaurantIds.length > 0) {
-    const { data: locs } = await supabase
-      .from("locations")
-      .select("*")
-      .in("restaurant_id", restaurantIds);
-    rawLocations = (locs || []) as Location[];
-  }
-
-  // Default fallback demo locations if DB is empty for demo setup
-  if (rawLocations.length === 0) {
-    rawLocations = [
-      {
-        id: "loc-101",
-        restaurant_id: "r-1",
-        name: "Downtown Main Branch",
-        timezone: "America/New_York",
-        status: "active",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-      {
-        id: "loc-102",
-        restaurant_id: "r-1",
-        name: "Uptown Express Outlet",
-        timezone: "America/New_York",
-        status: "active",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-    ];
-  }
-
-  // 3. Construct Available Branch Options
+  // 4. Construct Available Branch Options
   const availableBranches: BranchOption[] = [];
 
   if (isMultiBranchEntitled) {

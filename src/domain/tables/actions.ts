@@ -2,6 +2,8 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { resolveUserContext } from "@/domain/context/service";
+
+const DEFAULT_LOC_1_ID = "00000000-0000-0000-0000-000000000101";
 import {
   TableItemExtended,
   TableStatus,
@@ -38,6 +40,11 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
   let locationId = context.selectedBranch?.id || "";
   if (branchIdParam && branchIdParam !== "all") {
     locationId = branchIdParam;
+  }
+
+  if (locationId === "all" || !locationId.includes("-")) {
+    const realBranch = context.branches.find((b) => !b.isAll && b.id !== "all");
+    locationId = realBranch?.id || DEFAULT_LOC_1_ID;
   }
 
   // Concurrent Promise.all fetch for Tables, Active Orders, and Reservations
@@ -118,13 +125,19 @@ export async function createTable(input: CreateTableInput) {
       return { success: false, error: "Active branch context required." };
     }
 
+    let locationId = context.selectedBranch.id;
+    if (locationId === "all" || !locationId.includes("-")) {
+      const realBranch = context.branches.find((b) => !b.isAll && b.id !== "all");
+      locationId = realBranch?.id || DEFAULT_LOC_1_ID;
+    }
+
     const supabase = await createClient();
 
     const { data: table, error } = await supabase
       .from("tables")
       .insert({
         org_id: context.org.id,
-        location_id: context.selectedBranch.id,
+        location_id: locationId,
         table_number: input.table_number.trim(),
         capacity: input.capacity,
         floor_area: input.floor_area.trim() || "Main Floor",
@@ -335,13 +348,19 @@ export async function createReservation(input: CreateReservationInput) {
       return { success: false, error: "Customer name is required." };
     }
 
+    let locationId = context.selectedBranch.id;
+    if (locationId === "all" || !locationId.includes("-")) {
+      const realBranch = context.branches.find((b) => !b.isAll && b.id !== "all");
+      locationId = realBranch?.id || DEFAULT_LOC_1_ID;
+    }
+
     const supabase = await createClient();
 
     const { data: reservation, error } = await supabase
       .from("reservations")
       .insert({
         org_id: context.org.id,
-        location_id: context.selectedBranch.id,
+        location_id: locationId,
         customer_name: input.customer_name.trim(),
         customer_phone: input.customer_phone?.trim() || null,
         customer_email: input.customer_email?.trim() || null,
