@@ -4,18 +4,14 @@ import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentPlan, canAccess } from "../entitlements/service";
 import { BranchOption } from "./types";
-import { Organization, Location } from "../types";
-
+import { Organization, Branch } from "../types";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
-const DEFAULT_REST_ID = "00000000-0000-0000-0000-000000000010";
-const DEFAULT_LOC_1_ID = "00000000-0000-0000-0000-000000000101";
+const DEFAULT_BRANCH_1_ID = "00000000-0000-0000-0000-000000000101";
+const DEFAULT_BRANCH_2_ID = "00000000-0000-0000-0000-000000000102";
 const DEFAULT_ROLE_ID = "00000000-0000-0000-0000-000000000099";
 
-/**
- * Gets privileged admin client if available, else falls back to server client.
- */
 function getAdminOrServerClient(supabase: Awaited<ReturnType<typeof createClient>>) {
   try {
     return createAdminClient();
@@ -25,12 +21,10 @@ function getAdminOrServerClient(supabase: Awaited<ReturnType<typeof createClient
 }
 
 /**
- * Ensures default organization, restaurant, location, role, and membership records exist
- * in Supabase PostgreSQL in strict relational sequence.
- * Guarantees zero Foreign Key constraint errors (e.g. tables_location_id_fkey).
+ * Ensures default organization, branches, floors, roles, and memberships exist in database.
  */
 async function ensureValidTenantContext(
-  supabase: ReturnType<typeof createClient> extends Promise<infer T> ? T : never,
+  supabase: Awaited<ReturnType<typeof createClient>>,
   user: { id: string; email?: string },
   orgIdParam?: string
 ) {
@@ -125,47 +119,23 @@ async function ensureValidTenantContext(
     { onConflict: "org_id, user_id" }
   );
 
-  // 5. Ensure Restaurant exists for Organization
-  const { data: dbRests } = await db
-    .from("restaurants")
-    .select("id")
-    .eq("org_id", activeOrg.id)
-    .limit(1);
-
-  let restaurantId = dbRests?.[0]?.id;
-  if (!restaurantId) {
-    const { data: newRest } = await db
-      .from("restaurants")
-      .upsert(
-        {
-          id: DEFAULT_REST_ID,
-          org_id: activeOrg.id,
-          name: activeOrg.name,
-        },
-        { onConflict: "id" }
-      )
-      .select("id")
-      .single();
-
-    restaurantId = newRest?.id || DEFAULT_REST_ID;
-  }
-
-  // 6. Ensure Location exists for Restaurant
-  const { data: dbLocs } = await db
-    .from("locations")
+  // 5. Ensure Branches exist for Organization
+  const { data: dbBranches } = await db
+    .from("branches")
     .select("*")
-    .eq("restaurant_id", restaurantId);
+    .eq("org_id", activeOrg.id);
 
-  let rawLocations: Location[] = (dbLocs || []) as Location[];
+  let rawBranches: Branch[] = (dbBranches || []) as Branch[];
 
-  if (rawLocations.length === 0) {
-    const { data: newLoc } = await db
-      .from("locations")
+  if (rawBranches.length === 0) {
+    const { data: b1 } = await db
+      .from("branches")
       .upsert(
         {
-          id: DEFAULT_LOC_1_ID,
-          restaurant_id: restaurantId,
+          id: DEFAULT_BRANCH_1_ID,
+          org_id: activeOrg.id,
           name: "Downtown Main Branch",
+          code: "DTMain",
           timezone: "America/New_York",
           status: "active",
         },
@@ -174,14 +144,41 @@ async function ensureValidTenantContext(
       .select()
       .single();
 
-    if (newLoc) {
-      rawLocations = [newLoc as Location];
-    } else {
-      rawLocations = [
+    const { data: b2 } = await db
+      .from("branches")
+      .upsert(
         {
-          id: DEFAULT_LOC_1_ID,
-          restaurant_id: restaurantId,
+          id: DEFAULT_BRANCH_2_ID,
+          org_id: activeOrg.id,
+          name: "Uptown Express Outlet",
+          code: "UPExpress",
+          timezone: "America/New_York",
+          status: "active",
+        },
+        { onConflict: "id" }
+      )
+      .select()
+      .single();
+
+    rawBranches = [b1, b2].filter(Boolean) as Branch[];
+
+    if (rawBranches.length === 0) {
+      rawBranches = [
+        {
+          id: DEFAULT_BRANCH_1_ID,
+          org_id: activeOrg.id,
           name: "Downtown Main Branch",
+          code: "DTMain",
+          timezone: "America/New_York",
+          status: "active",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: DEFAULT_BRANCH_2_ID,
+          org_id: activeOrg.id,
+          name: "Uptown Express Outlet",
+          code: "UPExpress",
           timezone: "America/New_York",
           status: "active",
           created_at: new Date().toISOString(),
@@ -191,10 +188,24 @@ async function ensureValidTenantContext(
     }
   }
 
+  // 6. Ensure Default Floor ("Main Floor") exists for each Branch
+  for (const b of rawBranches) {
+    await db.from("floors").upsert(
+      {
+        org_id: activeOrg.id,
+        branch_id: b.id,
+        name: "Main Floor",
+        sort_order: 0,
+        status: "active",
+      },
+      { onConflict: "branch_id, name" }
+    );
+  }
+
   return {
     orgs: [activeOrg],
     activeOrg,
-    rawLocations,
+    rawBranches,
   };
 }
 
@@ -233,7 +244,7 @@ export const resolveUserContext = cache(async function (
     .single();
 
   // 2. Ensure Valid Relational Tenant Structure in DB
-  const { orgs, activeOrg, rawLocations } = await ensureValidTenantContext(
+  const { orgs, activeOrg, rawBranches } = await ensureValidTenantContext(
     supabase,
     user,
     orgIdParam
@@ -256,11 +267,11 @@ export const resolveUserContext = cache(async function (
     });
   }
 
-  rawLocations.forEach((loc) => {
+  rawBranches.forEach((b) => {
     availableBranches.push({
-      id: loc.id,
-      name: loc.name,
-      code: loc.id.substring(0, 6).toUpperCase(),
+      id: b.id,
+      name: b.name,
+      code: b.code || b.id.substring(0, 6).toUpperCase(),
     });
   });
 

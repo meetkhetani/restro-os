@@ -54,6 +54,19 @@ export interface Location {
   updated_at: string;
 }
 
+export interface Branch {
+  id: string;
+  org_id: string;
+  name: string;
+  code?: string | null;
+  address?: LocationAddress;
+  timezone: string;
+  phone?: string | null;
+  status: LocationStatus;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Role {
   id: string;
   org_id?: string | null;

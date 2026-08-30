@@ -16,14 +16,27 @@ export type ReservationStatus =
   | "cancelled"
   | "no_show";
 
+export interface Floor {
+  id: string;
+  org_id: string;
+  branch_id: string;
+  name: string;
+  sort_order: number;
+  status: "active" | "inactive";
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TableItemExtended {
   id: string;
   org_id: string;
-  location_id: string;
+  branch_id: string;
+  floor_id: string;
+  location_id?: string;
   table_number: string;
   capacity: number;
-  section: string;
-  floor_area: string;
+  section?: string;
+  floor_area?: string;
   pos_x: number;
   pos_y: number;
   shape: TableShape;
@@ -31,13 +44,15 @@ export interface TableItemExtended {
   merged_into_table_id?: string | null;
   created_at: string;
   updated_at: string;
+  floor?: Floor | null;
   active_order?: Order | null;
 }
 
 export interface Reservation {
   id: string;
   org_id: string;
-  location_id: string;
+  branch_id: string;
+  location_id?: string;
   table_id?: string | null;
   customer_id?: string | null;
   customer_name: string;
@@ -52,17 +67,24 @@ export interface Reservation {
   table?: TableItemExtended | null;
 }
 
+export interface CreateFloorInput {
+  name: string;
+  sort_order?: number;
+}
+
 export interface CreateTableInput {
+  floor_id: string;
   table_number: string;
   capacity: number;
-  floor_area: string;
   shape: TableShape;
+  floor_area?: string;
   pos_x?: number;
   pos_y?: number;
 }
 
 export interface UpdateTableInput {
   id: string;
+  floor_id?: string;
   table_number?: string;
   capacity?: number;
   floor_area?: string;

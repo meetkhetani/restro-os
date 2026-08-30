@@ -2,14 +2,12 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { resolveUserContext } from "@/domain/context/service";
-
-const DEFAULT_LOC_1_ID = "00000000-0000-0000-0000-000000000101";
 import {
+  Floor,
   TableItemExtended,
-  TableStatus,
   Reservation,
-  ReservationStatus,
   CreateTableInput,
+  CreateFloorInput,
   UpdateTableInput,
   TransferOrderInput,
   MergeTablesInput,
@@ -17,101 +15,80 @@ import {
 } from "./types";
 import { Order } from "@/domain/pos/types";
 
+const DEFAULT_BRANCH_1_ID = "00000000-0000-0000-0000-000000000101";
+
 /**
- * Ensures an active location UUID exists in Supabase DB before inserting dependent records.
+ * Ensures valid branch ID and ensures at least one default Floor exists for the branch.
  */
-async function ensureLocationInDb(
+async function resolveBranchAndFloorContext(
   supabase: Awaited<ReturnType<typeof createClient>>,
   targetOrgId: string,
-  preferredLocationId: string
+  preferredBranchId: string
 ) {
-  // 1. Check if preferredLocationId already exists in locations table
-  if (preferredLocationId && preferredLocationId.includes("-") && preferredLocationId !== "all") {
-    const { data: directLoc } = await supabase
-      .from("locations")
-      .select("id, restaurant:restaurants(org_id)")
-      .eq("id", preferredLocationId)
-      .maybeSingle();
+  let branchId = preferredBranchId;
+  if (branchId === "all" || !branchId.includes("-")) {
+    const { data: dbBranches } = await supabase
+      .from("branches")
+      .select("id")
+      .eq("org_id", targetOrgId)
+      .limit(1);
 
-    if (directLoc) {
-      const orgId = (directLoc.restaurant as unknown as { org_id: string })?.org_id || targetOrgId;
-      return { locationId: directLoc.id, orgId };
-    }
+    branchId = dbBranches?.[0]?.id || DEFAULT_BRANCH_1_ID;
   }
 
-  // 2. Check if ANY location exists in database
-  const { data: anyLocs } = await supabase
-    .from("locations")
-    .select("id, restaurant:restaurants(org_id)")
+  // Ensure branch exists in branches table
+  const { data: branchCheck } = await supabase
+    .from("branches")
+    .select("id")
+    .eq("id", branchId)
+    .maybeSingle();
+
+  if (!branchCheck) {
+    await supabase.from("branches").upsert(
+      {
+        id: branchId,
+        org_id: targetOrgId,
+        name: "Main Branch",
+        status: "active",
+      },
+      { onConflict: "id" }
+    );
+  }
+
+  // Ensure default floor exists for this branch
+  const { data: floorCheck } = await supabase
+    .from("floors")
+    .select("id")
+    .eq("branch_id", branchId)
     .limit(1);
 
-  if (anyLocs && anyLocs.length > 0) {
-    const orgId = (anyLocs[0].restaurant as unknown as { org_id: string })?.org_id || targetOrgId;
-    return { locationId: anyLocs[0].id, orgId };
-  }
-
-  // 3. Auto-provision organization -> restaurant -> location in DB if completely empty
-  const { data: orgs } = await supabase.from("organizations").select("id").limit(1);
-  let orgId = orgs?.[0]?.id || targetOrgId;
-
-  if (!orgs || orgs.length === 0) {
-    const { data: newOrg } = await supabase
-      .from("organizations")
-      .insert({
-        name: "Grand Restro Group",
-        slug: "grand-restro",
-      })
-      .select("id")
-      .single();
-
-    if (newOrg) orgId = newOrg.id;
-  }
-
-  const { data: rests } = await supabase.from("restaurants").select("id").eq("org_id", orgId).limit(1);
-  let restId = rests?.[0]?.id;
-
-  if (!restId) {
-    const { data: newRest } = await supabase
-      .from("restaurants")
-      .insert({
-        org_id: orgId,
-        name: "Main Restaurant",
-      })
-      .select("id")
-      .single();
-
-    if (newRest) restId = newRest.id;
-  }
-
-  if (restId) {
-    const { data: newLoc } = await supabase
-      .from("locations")
-      .insert({
-        restaurant_id: restId,
-        name: "Downtown Main Branch",
-        timezone: "America/New_York",
+  if (!floorCheck || floorCheck.length === 0) {
+    await supabase.from("floors").upsert(
+      {
+        org_id: targetOrgId,
+        branch_id: branchId,
+        name: "Main Floor",
+        sort_order: 0,
         status: "active",
-      })
-      .select("id")
-      .single();
-
-    if (newLoc) return { locationId: newLoc.id, orgId };
+      },
+      { onConflict: "branch_id, name" }
+    );
   }
 
-  return { locationId: preferredLocationId, orgId: targetOrgId };
+  return branchId;
 }
 
 /**
- * Fetch Floor Plan Tables, Active Orders, and Reservations concurrently for target branch context.
+ * Server Action: Fetch Floors, Tables, Active Orders, and Reservations for target branch.
  */
 export async function getTablesAndFloorData(branchIdParam?: string) {
   const context = await resolveUserContext();
 
   if (!context.org) {
     return {
+      floors: [] as Floor[],
       tables: [] as TableItemExtended[],
       reservations: [] as Reservation[],
-      floorAreas: ["Main Floor"],
       stats: { total: 0, available: 0, occupied: 0, reserved: 0, cleaning: 0, disabled: 0 },
       branch: null,
       organization: null,
@@ -121,54 +98,56 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
   const supabase = await createClient();
   const orgId = context.org.id;
 
-  let locationId = context.selectedBranch?.id || "";
+  let targetBranchId = context.selectedBranch?.id || "";
   if (branchIdParam && branchIdParam !== "all") {
-    locationId = branchIdParam;
+    targetBranchId = branchIdParam;
   }
 
-  if (locationId === "all" || !locationId.includes("-")) {
-    const realBranch = context.branches.find((b) => !b.isAll && b.id !== "all");
-    locationId = realBranch?.id || DEFAULT_LOC_1_ID;
-  }
+  const branchId = await resolveBranchAndFloorContext(supabase, orgId, targetBranchId);
 
-  const resolved = await ensureLocationInDb(supabase, orgId, locationId);
-  locationId = resolved.locationId;
+  // Parallel execution for Floors, Tables, Orders, and Reservations
+  const [floorsRes, tablesRes, activeOrdersRes, reservationsRes] = await Promise.all([
+    supabase
+      .from("floors")
+      .select("*")
+      .eq("org_id", orgId)
+      .eq("branch_id", branchId)
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true }),
 
-  // Concurrent Promise.all fetch for Tables, Active Orders, and Reservations
-  const [tablesRes, activeOrdersRes, reservationsRes] = await Promise.all([
     supabase
       .from("tables")
-      .select("*")
-      .eq("org_id", resolved.orgId)
-      .eq("location_id", locationId)
+      .select("*, floor:floors(*)")
+      .eq("org_id", orgId)
+      .eq("branch_id", branchId)
       .order("table_number", { ascending: true }),
 
     supabase
       .from("orders")
       .select("*, customer:customers(*), items:order_items(*)")
-      .eq("org_id", resolved.orgId)
-      .eq("location_id", locationId)
+      .eq("org_id", orgId)
+      .eq("branch_id", branchId)
       .in("status", ["pending", "confirmed", "preparing", "ready"]),
 
     supabase
       .from("reservations")
       .select("*, table:tables(*)")
-      .eq("org_id", resolved.orgId)
-      .eq("location_id", locationId)
+      .eq("org_id", orgId)
+      .eq("branch_id", branchId)
       .order("reservation_time", { ascending: true }),
   ]);
 
+  const floors = (floorsRes.data || []) as Floor[];
   const rawTables = tablesRes.data || [];
   const activeOrders = (activeOrdersRes.data || []) as Order[];
   const reservations = (reservationsRes.data || []) as Reservation[];
 
-  // Map active order to occupied tables
   const tables: TableItemExtended[] = rawTables.map((tbl) => {
     const activeOrder = activeOrders.find((o) => o.table_id === tbl.id) || null;
     return {
       ...tbl,
       capacity: Number(tbl.capacity),
-      floor_area: tbl.floor_area || tbl.section || "Main Floor",
+      floor_area: tbl.floor?.name || tbl.section || "Main Floor",
       pos_x: Number(tbl.pos_x || 0),
       pos_y: Number(tbl.pos_y || 0),
       shape: tbl.shape || "square",
@@ -176,13 +155,6 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
     };
   });
 
-  // Extract unique floor areas
-  const floorAreaSet = new Set<string>();
-  tables.forEach((t) => floorAreaSet.add(t.floor_area));
-  if (floorAreaSet.size === 0) floorAreaSet.add("Main Floor");
-  const floorAreas = Array.from(floorAreaSet);
-
-  // Compute Table Stats Summary
   const stats = {
     total: tables.length,
     available: tables.filter((t) => t.status === "available").length,
@@ -193,9 +165,9 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
   };
 
   return {
+    floors,
     tables,
     reservations,
-    floorAreas,
     stats,
     branch: context.selectedBranch,
     organization: context.org,
@@ -203,7 +175,54 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
 }
 
 /**
- * Server Action: Create New Floor Table
+ * Server Action: Create New Floor Record
+ */
+export async function createFloor(input: CreateFloorInput) {
+  try {
+    const context = await resolveUserContext();
+    if (!context.org || !context.selectedBranch) {
+      return { success: false, error: "Active branch context required." };
+    }
+
+    if (!input.name || !input.name.trim()) {
+      return { success: false, error: "Floor name is required." };
+    }
+
+    const supabase = await createClient();
+    const branchId = await resolveBranchAndFloorContext(
+      supabase,
+      context.org.id,
+      context.selectedBranch.id
+    );
+
+    const { data: floor, error } = await supabase
+      .from("floors")
+      .insert({
+        org_id: context.org.id,
+        branch_id: branchId,
+        name: input.name.trim(),
+        sort_order: input.sort_order || 0,
+        status: "active",
+      })
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === "23505") {
+        return { success: false, error: "A floor with this name already exists in this branch." };
+      }
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, floor };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Failed to create floor.";
+    return { success: false, error: msg };
+  }
+}
+
+/**
+ * Server Action: Create New Floor Table with Canonical Validation
  */
 export async function createTable(input: CreateTableInput) {
   try {
@@ -212,24 +231,47 @@ export async function createTable(input: CreateTableInput) {
       return { success: false, error: "Active branch context required." };
     }
 
-    let locationId = context.selectedBranch.id;
-    if (locationId === "all" || !locationId.includes("-")) {
-      const realBranch = context.branches.find((b) => !b.isAll && b.id !== "all");
-      locationId = realBranch?.id || DEFAULT_LOC_1_ID;
+    if (!input.table_number || !input.table_number.trim()) {
+      return { success: false, error: "Table number is required." };
+    }
+
+    if (input.capacity <= 0) {
+      return { success: false, error: "Table capacity must be greater than 0." };
     }
 
     const supabase = await createClient();
-    const resolved = await ensureLocationInDb(supabase, context.org.id, locationId);
+    const branchId = await resolveBranchAndFloorContext(
+      supabase,
+      context.org.id,
+      context.selectedBranch.id
+    );
 
+    // Verify Floor Ownership & Security Context
+    let floorId = input.floor_id;
+    if (!floorId || !floorId.includes("-")) {
+      const { data: firstFloor } = await supabase
+        .from("floors")
+        .select("id")
+        .eq("branch_id", branchId)
+        .limit(1)
+        .single();
+
+      floorId = firstFloor?.id || "";
+    }
+
+    if (!floorId) {
+      return { success: false, error: "Valid floor selection required." };
+    }
+
+    // Insert Table with Canonical Foreign Keys
     const { data: table, error } = await supabase
       .from("tables")
       .insert({
-        org_id: resolved.orgId,
-        location_id: resolved.locationId,
+        org_id: context.org.id,
+        branch_id: branchId,
+        floor_id: floorId,
         table_number: input.table_number.trim(),
         capacity: input.capacity,
-        floor_area: input.floor_area.trim() || "Main Floor",
-        section: input.floor_area.trim() || "Main Floor",
         shape: input.shape || "square",
         pos_x: input.pos_x || 0,
         pos_y: input.pos_y || 0,
@@ -239,6 +281,12 @@ export async function createTable(input: CreateTableInput) {
       .single();
 
     if (error) {
+      if (error.code === "23505") {
+        return {
+          success: false,
+          error: `Table "${input.table_number}" already exists in this branch.`,
+        };
+      }
       return { success: false, error: error.message };
     }
 
@@ -250,12 +298,14 @@ export async function createTable(input: CreateTableInput) {
 }
 
 /**
- * Server Action: Update Table Details & Layout Positioning
+ * Server Action: Update Floor Table Properties
  */
 export async function updateTable(input: UpdateTableInput) {
   try {
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Authentication required." };
+    if (!context.org) {
+      return { success: false, error: "Authenticated organization context required." };
+    }
 
     const supabase = await createClient();
 
@@ -263,26 +313,25 @@ export async function updateTable(input: UpdateTableInput) {
       updated_at: new Date().toISOString(),
     };
 
+    if (input.floor_id) updatePayload.floor_id = input.floor_id;
     if (input.table_number) updatePayload.table_number = input.table_number.trim();
     if (input.capacity) updatePayload.capacity = input.capacity;
-    if (input.floor_area) {
-      updatePayload.floor_area = input.floor_area.trim();
-      updatePayload.section = input.floor_area.trim();
-    }
     if (input.shape) updatePayload.shape = input.shape;
     if (input.status) updatePayload.status = input.status;
     if (typeof input.pos_x === "number") updatePayload.pos_x = input.pos_x;
     if (typeof input.pos_y === "number") updatePayload.pos_y = input.pos_y;
 
-    const { error } = await supabase
+    const { data: table, error } = await supabase
       .from("tables")
       .update(updatePayload)
       .eq("id", input.id)
-      .eq("org_id", context.org.id);
+      .eq("org_id", context.org.id)
+      .select()
+      .single();
 
     if (error) return { success: false, error: error.message };
 
-    return { success: true, message: "Table updated successfully." };
+    return { success: true, table };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Failed to update table.";
     return { success: false, error: msg };
@@ -290,76 +339,47 @@ export async function updateTable(input: UpdateTableInput) {
 }
 
 /**
- * Server Action: Update Table Status (Available, Occupied, Reserved, Cleaning, Disabled)
+ * Server Action: Update Table Status
  */
-export async function updateTableStatus(tableId: string, status: TableStatus) {
-  try {
-    const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Authentication required." };
-
-    const supabase = await createClient();
-
-    const { error } = await supabase
-      .from("tables")
-      .update({
-        status,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", tableId)
-      .eq("org_id", context.org.id);
-
-    if (error) return { success: false, error: error.message };
-
-    return { success: true, message: `Table status updated to ${status}.` };
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Failed to update status.";
-    return { success: false, error: msg };
-  }
+export async function updateTableStatus(tableId: string, status: TableItemExtended["status"]) {
+  return updateTable({ id: tableId, status });
 }
 
 /**
- * Server Action: Transfer Active Order from Table A to Table B
+ * Server Action: Transfer Dine-in Order between Tables
  */
 export async function transferTableOrder(input: TransferOrderInput) {
   try {
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Authentication required." };
-
-    const supabase = await createClient();
-    const orgId = context.org.id;
-
-    // 1. Fetch active order on source table
-    const { data: order, error: orderError } = await supabase
-      .from("orders")
-      .select("id, order_number")
-      .eq("org_id", orgId)
-      .eq("table_id", input.from_table_id)
-      .in("status", ["pending", "confirmed", "preparing", "ready"])
-      .maybeSingle();
-
-    if (orderError || !order) {
-      return { success: false, error: "No active order found on the source table." };
+    if (!context.org) {
+      return { success: false, error: "Authenticated organization context required." };
     }
 
-    // 2. Transfer order table assignment to target table
-    await supabase
-      .from("orders")
-      .update({ table_id: input.to_table_id, updated_at: new Date().toISOString() })
-      .eq("id", order.id);
+    const supabase = await createClient();
 
-    // 3. Update table statuses: source table -> available, target table -> occupied
+    const { data: activeOrder, error: orderErr } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("table_id", input.from_table_id)
+      .in("status", ["pending", "confirmed", "preparing", "ready"])
+      .single();
+
+    if (orderErr || !activeOrder) {
+      return { success: false, error: "No active order found on source table." };
+    }
+
+    await supabase.from("orders").update({ table_id: input.to_table_id }).eq("id", activeOrder.id);
     await supabase.from("tables").update({ status: "available" }).eq("id", input.from_table_id);
     await supabase.from("tables").update({ status: "occupied" }).eq("id", input.to_table_id);
 
-    // 4. Log audit event
     await supabase.from("order_events").insert({
-      order_id: order.id,
-      status: "transferred",
+      order_id: activeOrder.id,
+      status: activeOrder.status,
       actor_id: context.user?.id || null,
-      notes: `Order ${order.order_number} transferred from Table to Table.`,
+      notes: `Order transferred from Table #${input.from_table_id} to Table #${input.to_table_id}`,
     });
 
-    return { success: true, message: `Order ${order.order_number} successfully transferred.` };
+    return { success: true, message: "Order transferred successfully." };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Failed to transfer order.";
     return { success: false, error: msg };
@@ -372,7 +392,9 @@ export async function transferTableOrder(input: TransferOrderInput) {
 export async function mergeTables(input: MergeTablesInput) {
   try {
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Authentication required." };
+    if (!context.org) {
+      return { success: false, error: "Authenticated organization context required." };
+    }
 
     const supabase = await createClient();
 
@@ -380,6 +402,7 @@ export async function mergeTables(input: MergeTablesInput) {
       .from("tables")
       .update({
         merged_into_table_id: input.target_table_id,
+        status: "occupied",
         updated_at: new Date().toISOString(),
       })
       .eq("id", input.source_table_id)
@@ -400,7 +423,9 @@ export async function mergeTables(input: MergeTablesInput) {
 export async function splitTables(tableId: string) {
   try {
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Authentication required." };
+    if (!context.org) {
+      return { success: false, error: "Authenticated organization context required." };
+    }
 
     const supabase = await createClient();
 
@@ -436,20 +461,18 @@ export async function createReservation(input: CreateReservationInput) {
       return { success: false, error: "Customer name is required." };
     }
 
-    let locationId = context.selectedBranch.id;
-    if (locationId === "all" || !locationId.includes("-")) {
-      const realBranch = context.branches.find((b) => !b.isAll && b.id !== "all");
-      locationId = realBranch?.id || DEFAULT_LOC_1_ID;
-    }
-
     const supabase = await createClient();
-    const resolved = await ensureLocationInDb(supabase, context.org.id, locationId);
+    const branchId = await resolveBranchAndFloorContext(
+      supabase,
+      context.org.id,
+      context.selectedBranch.id
+    );
 
     const { data: reservation, error } = await supabase
       .from("reservations")
       .insert({
-        org_id: resolved.orgId,
-        location_id: resolved.locationId,
+        org_id: context.org.id,
+        branch_id: branchId,
         customer_name: input.customer_name.trim(),
         customer_phone: input.customer_phone?.trim() || null,
         customer_email: input.customer_email?.trim() || null,
@@ -464,7 +487,6 @@ export async function createReservation(input: CreateReservationInput) {
 
     if (error) return { success: false, error: error.message };
 
-    // If table assigned during booking, set table status to reserved
     if (input.table_id) {
       await supabase
         .from("tables")
@@ -480,43 +502,38 @@ export async function createReservation(input: CreateReservationInput) {
 }
 
 /**
- * Server Action: Update Reservation Status (e.g. Seating guests)
+ * Server Action: Update Reservation Status
  */
 export async function updateReservationStatus(
   reservationId: string,
-  status: ReservationStatus,
-  tableId?: string
+  status: Reservation["status"]
 ) {
   try {
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Authentication required." };
+    if (!context.org) {
+      return { success: false, error: "Authenticated organization context required." };
+    }
 
     const supabase = await createClient();
 
-    const updatePayload: Record<string, unknown> = {
-      status,
-      updated_at: new Date().toISOString(),
-    };
-
-    if (tableId) updatePayload.table_id = tableId;
-
-    const { error } = await supabase
+    const { data: reservation, error } = await supabase
       .from("reservations")
-      .update(updatePayload)
+      .update({ status, updated_at: new Date().toISOString() })
       .eq("id", reservationId)
-      .eq("org_id", context.org.id);
+      .eq("org_id", context.org.id)
+      .select()
+      .single();
 
     if (error) return { success: false, error: error.message };
 
-    // If seated, set table status to occupied
-    if (status === "seated" && tableId) {
+    if (status === "seated" && reservation?.table_id) {
       await supabase
         .from("tables")
         .update({ status: "occupied" })
-        .eq("id", tableId);
+        .eq("id", reservation.table_id);
     }
 
-    return { success: true, message: `Reservation status updated to ${status}.` };
+    return { success: true, reservation };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Failed to update reservation.";
     return { success: false, error: msg };

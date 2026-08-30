@@ -15,9 +15,9 @@ export default async function TablesPage() {
 
   return (
     <TablesPageClient
+      initialFloors={initialData.floors}
       initialTables={initialData.tables}
       initialReservations={initialData.reservations}
-      initialFloorAreas={initialData.floorAreas}
       initialStats={initialData.stats}
       branches={branches}
       currentBranchId={currentBranchId}

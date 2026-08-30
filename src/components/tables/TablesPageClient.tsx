@@ -6,16 +6,11 @@ import {
   Calendar,
   Building2,
   RefreshCw,
-  Clock,
-  CheckCircle2,
-  AlertCircle,
-  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
 import { createClient } from "@/lib/supabase/client";
-import { TableItemExtended, Reservation } from "@/domain/tables/types";
+import { Floor, TableItemExtended, Reservation } from "@/domain/tables/types";
 import { getTablesAndFloorData } from "@/domain/tables/actions";
 import { FloorPlanView } from "./FloorPlanView";
 import { ReservationsView } from "./ReservationsView";
@@ -27,9 +22,9 @@ interface BranchOptionItem {
 }
 
 interface TablesPageClientProps {
+  initialFloors: Floor[];
   initialTables: TableItemExtended[];
   initialReservations: Reservation[];
-  initialFloorAreas: string[];
   initialStats: {
     total: number;
     available: number;
@@ -43,9 +38,9 @@ interface TablesPageClientProps {
 }
 
 export function TablesPageClient({
+  initialFloors,
   initialTables,
   initialReservations,
-  initialFloorAreas,
   initialStats,
   branches,
   currentBranchId,
@@ -53,9 +48,9 @@ export function TablesPageClient({
   const { addToast } = useToast();
 
   const [activeTab, setActiveTab] = React.useState<"floor" | "reservations">("floor");
+  const [floors, setFloors] = React.useState<Floor[]>(initialFloors);
   const [tables, setTables] = React.useState<TableItemExtended[]>(initialTables);
   const [reservations, setReservations] = React.useState<Reservation[]>(initialReservations);
-  const [floorAreas, setFloorAreas] = React.useState<string[]>(initialFloorAreas);
   const [stats, setStats] = React.useState(initialStats);
   const [selectedBranchId, setSelectedBranchId] = React.useState<string>(currentBranchId);
   const [isLoading, setIsLoading] = React.useState(false);
@@ -64,9 +59,9 @@ export function TablesPageClient({
     setIsLoading(true);
     try {
       const res = await getTablesAndFloorData(selectedBranchId);
+      setFloors(res.floors);
       setTables(res.tables);
       setReservations(res.reservations);
-      setFloorAreas(res.floorAreas);
       setStats(res.stats);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to refresh table data.";
@@ -84,7 +79,7 @@ export function TablesPageClient({
     fetchLatestData();
   }, [selectedBranchId, fetchLatestData]);
 
-  // Supabase Realtime Subscription for Live Table & Reservation State
+  // Supabase Realtime Subscription for Live Floors, Tables & Reservations State
   React.useEffect(() => {
     const supabase = createClient();
 
@@ -92,17 +87,18 @@ export function TablesPageClient({
       .channel("tables_live_sync")
       .on(
         "postgres_changes",
+        { event: "*", schema: "public", table: "floors" },
+        () => fetchLatestData()
+      )
+      .on(
+        "postgres_changes",
         { event: "*", schema: "public", table: "tables" },
-        () => {
-          fetchLatestData();
-        }
+        () => fetchLatestData()
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "reservations" },
-        () => {
-          fetchLatestData();
-        }
+        () => fetchLatestData()
       )
       .subscribe();
 
@@ -112,111 +108,112 @@ export function TablesPageClient({
   }, [fetchLatestData]);
 
   return (
-    <div className="space-y-5 p-6 max-w-7xl mx-auto font-sans">
-      {/* Header & Branch Switcher */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="space-y-6">
+      {/* Top Header & Multi-Branch Selector */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b pb-4 border-gray-200">
         <div>
-          <h1 className="text-2xl font-extrabold text-restro-900 tracking-tight">
-            Tables & Floor Plan Management
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight flex items-center gap-2">
+            <Utensils className="h-7 w-7 text-amber-600" /> Tables & Floor Plans
           </h1>
-          <p className="text-xs font-medium text-restro-500 flex items-center gap-1.5 mt-0.5">
-            <Clock className="h-3.5 w-3.5 text-brand-500 inline" /> Real-time dine-in floor layout, table statuses & guest reservations
+          <p className="text-sm text-gray-500 mt-1">
+            Manage floor layouts, table status, seating assignments, and guest reservations.
           </p>
         </div>
 
-        <div className="flex items-center space-x-3">
-          {branches.length > 0 && (
-            <div className="flex items-center space-x-2 bg-surface border border-restro-200 px-3 py-1.5 rounded-lg shadow-card">
-              <Building2 className="h-4 w-4 text-brand-500" />
-              <select
-                value={selectedBranchId}
-                onChange={(e) => setSelectedBranchId(e.target.value)}
-                className="bg-transparent text-xs font-bold text-restro-800 focus:outline-none"
-              >
-                {branches.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Branch Selector */}
+          <div className="flex items-center gap-2 bg-white rounded-xl border border-gray-200 p-1.5 shadow-sm">
+            <Building2 className="h-4 w-4 text-amber-600 ml-2" />
+            <select
+              value={selectedBranchId}
+              onChange={(e) => setSelectedBranchId(e.target.value)}
+              className="bg-transparent text-xs font-bold text-gray-800 focus:outline-none cursor-pointer pr-3"
+            >
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </div>
 
-          <Button variant="outline" size="sm" onClick={() => fetchLatestData()} isLoading={isLoading}>
-            <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
+          <Button
+            onClick={fetchLatestData}
+            disabled={isLoading}
+            variant="outline"
+            size="sm"
+            className="flex items-center gap-1.5 border-gray-200 text-gray-700 hover:bg-gray-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
+            Refresh
           </Button>
         </div>
       </div>
 
-      {/* KPI Stats Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-        <Card className="p-3 bg-surface border-restro-200 shadow-card">
-          <span className="text-restro-500 text-xs">Total Tables</span>
-          <p className="text-lg font-extrabold text-restro-900 mt-0.5">{stats.total}</p>
-        </Card>
-
-        <Card className="p-3 bg-surface border-restro-200 shadow-card">
-          <span className="text-emerald-600 text-xs font-semibold">Available</span>
-          <p className="text-lg font-extrabold text-emerald-700 mt-0.5">{stats.available}</p>
-        </Card>
-
-        <Card className="p-3 bg-surface border-restro-200 shadow-card">
-          <span className="text-blue-600 text-xs font-semibold">Occupied</span>
-          <p className="text-lg font-extrabold text-blue-700 mt-0.5">{stats.occupied}</p>
-        </Card>
-
-        <Card className="p-3 bg-surface border-restro-200 shadow-card">
-          <span className="text-amber-600 text-xs font-semibold">Reserved</span>
-          <p className="text-lg font-extrabold text-amber-700 mt-0.5">{stats.reserved}</p>
-        </Card>
-
-        <Card className="p-3 bg-surface border-restro-200 shadow-card">
-          <span className="text-purple-600 text-xs font-semibold">Cleaning</span>
-          <p className="text-lg font-extrabold text-purple-700 mt-0.5">{stats.cleaning}</p>
-        </Card>
-
-        <Card className="p-3 bg-surface border-restro-200 shadow-card">
-          <span className="text-restro-500 text-xs font-semibold">Disabled</span>
-          <p className="text-lg font-extrabold text-restro-700 mt-0.5">{stats.disabled}</p>
-        </Card>
+      {/* Stats Summary Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+        <div className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm text-center">
+          <span className="text-xs font-semibold text-gray-500 block">Total Tables</span>
+          <span className="text-xl font-black text-gray-900">{stats.total}</span>
+        </div>
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 shadow-sm text-center">
+          <span className="text-xs font-semibold text-emerald-700 block">Available</span>
+          <span className="text-xl font-black text-emerald-800">{stats.available}</span>
+        </div>
+        <div className="rounded-xl border border-rose-200 bg-rose-50/50 p-3 shadow-sm text-center">
+          <span className="text-xs font-semibold text-rose-700 block">Occupied</span>
+          <span className="text-xl font-black text-rose-800">{stats.occupied}</span>
+        </div>
+        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 shadow-sm text-center">
+          <span className="text-xs font-semibold text-amber-700 block">Reserved</span>
+          <span className="text-xl font-black text-amber-800">{stats.reserved}</span>
+        </div>
+        <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-3 shadow-sm text-center">
+          <span className="text-xs font-semibold text-blue-700 block">Cleaning</span>
+          <span className="text-xl font-black text-blue-800">{stats.cleaning}</span>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 shadow-sm text-center">
+          <span className="text-xs font-semibold text-gray-500 block">Disabled</span>
+          <span className="text-xl font-black text-gray-600">{stats.disabled}</span>
+        </div>
       </div>
 
-      {/* Main Mode Tabs */}
-      <div className="bg-surface p-1.5 rounded-xl border border-restro-200 inline-flex space-x-1 shadow-card">
+      {/* Main Tab Navigation */}
+      <div className="flex border-b border-gray-200 gap-6">
         <button
           onClick={() => setActiveTab("floor")}
-          className={`flex items-center px-4 py-2 rounded-lg text-xs font-extrabold transition-all ${
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
             activeTab === "floor"
-              ? "bg-brand-500 text-white shadow-card"
-              : "text-restro-700 hover:bg-restro-100"
+              ? "border-amber-600 text-amber-600"
+              : "border-transparent text-gray-500 hover:text-gray-800"
           }`}
         >
-          <Utensils className="h-4 w-4 mr-2" /> Visual Floor Plan
+          <Utensils className="h-4 w-4" /> Floor Plan Layout
         </button>
 
         <button
           onClick={() => setActiveTab("reservations")}
-          className={`flex items-center px-4 py-2 rounded-lg text-xs font-extrabold transition-all ${
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
             activeTab === "reservations"
-              ? "bg-brand-500 text-white shadow-card"
-              : "text-restro-700 hover:bg-restro-100"
+              ? "border-amber-600 text-amber-600"
+              : "border-transparent text-gray-500 hover:text-gray-800"
           }`}
         >
-          <Calendar className="h-4 w-4 mr-2" /> Reservations ({reservations.length})
+          <Calendar className="h-4 w-4" /> Guest Reservations ({reservations.length})
         </button>
       </div>
 
-      {/* Tab Panels */}
+      {/* Active Tab View */}
       {activeTab === "floor" ? (
         <FloorPlanView
+          floors={floors}
           tables={tables}
-          floorAreas={floorAreas}
           onRefresh={fetchLatestData}
         />
       ) : (
         <ReservationsView
           reservations={reservations}
-          availableTables={tables.filter((t) => t.status === "available")}
+          availableTables={tables}
           onRefresh={fetchLatestData}
         />
       )}

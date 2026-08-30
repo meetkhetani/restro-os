@@ -100,15 +100,14 @@ export function ReservationsView({
 
   const handleStatusChange = async (
     reservationId: string,
-    status: ReservationStatus,
-    tableId?: string
+    status: ReservationStatus
   ) => {
-    const res = await updateReservationStatus(reservationId, status, tableId);
+    const res = await updateReservationStatus(reservationId, status);
     if (res.success) {
       addToast({
         type: "success",
         title: "Reservation Updated",
-        description: res.message,
+        description: "Reservation updated successfully.",
       });
       onRefresh();
     } else {
@@ -199,7 +198,7 @@ export function ReservationsView({
                   <Button
                     size="sm"
                     className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
-                    onClick={() => handleStatusChange(res.id, "seated", res.table_id || undefined)}
+                    onClick={() => handleStatusChange(res.id, "seated")}
                   >
                     <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Seat Guests
                   </Button>
