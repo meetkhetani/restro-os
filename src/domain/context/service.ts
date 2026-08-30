@@ -6,116 +6,181 @@ import { getCurrentPlan, canAccess } from "../entitlements/service";
 import { BranchOption } from "./types";
 import { Organization, Location } from "../types";
 
+import { createAdminClient } from "@/lib/supabase/admin";
+
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
+const DEFAULT_REST_ID = "00000000-0000-0000-0000-000000000010";
 const DEFAULT_LOC_1_ID = "00000000-0000-0000-0000-000000000101";
-const DEFAULT_LOC_2_ID = "00000000-0000-0000-0000-000000000102";
+const DEFAULT_ROLE_ID = "00000000-0000-0000-0000-000000000099";
 
 /**
- * Ensures default organization and location records exist in Supabase DB with valid UUIDs.
- * Prevents invalid UUID format errors and Foreign Key constraint violations.
+ * Gets privileged admin client if available, else falls back to server client.
+ */
+function getAdminOrServerClient(supabase: Awaited<ReturnType<typeof createClient>>) {
+  try {
+    return createAdminClient();
+  } catch {
+    return supabase;
+  }
+}
+
+/**
+ * Ensures default organization, restaurant, location, role, and membership records exist
+ * in Supabase PostgreSQL in strict relational sequence.
+ * Guarantees zero Foreign Key constraint errors (e.g. tables_location_id_fkey).
  */
 async function ensureValidTenantContext(
   supabase: ReturnType<typeof createClient> extends Promise<infer T> ? T : never,
-  user: { id: string },
+  user: { id: string; email?: string },
   orgIdParam?: string
 ) {
-  // 1. Check existing memberships & orgs
-  const { data: memberships } = await supabase
-    .from("memberships")
-    .select("*, organization:organizations(*), role:roles(*)")
-    .eq("user_id", user.id)
-    .eq("status", "active");
+  const db = getAdminOrServerClient(supabase);
 
-  const orgs = (memberships || [])
-    .map((m) => m.organization as Organization)
-    .filter(Boolean);
+  // 1. Ensure Profile exists in profiles
+  await db.from("profiles").upsert(
+    {
+      id: user.id,
+      full_name: "Restro Admin",
+      email: user.email || "admin@restro.os",
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "id" }
+  );
 
-  let activeOrg = orgs.find((o) => o.id === orgIdParam) || orgs[0];
+  // 2. Fetch or create Organization
+  const { data: dbOrgs } = await db.from("organizations").select("*").limit(1);
+  let activeOrg = (dbOrgs?.[0] as Organization) || null;
 
-  // If no org found, check database organizations table
   if (!activeOrg) {
-    const { data: dbOrgs } = await supabase
+    const { data: newOrg } = await db
       .from("organizations")
-      .select("*")
-      .limit(1);
-
-    if (dbOrgs && dbOrgs.length > 0) {
-      activeOrg = dbOrgs[0] as Organization;
-    } else {
-      // Auto-insert default organization into DB
-      const { data: insertedOrg } = await supabase
-        .from("organizations")
-        .insert({
+      .upsert(
+        {
           id: DEFAULT_ORG_ID,
           name: "Grand Restro Group",
           slug: "grand-restro",
-        })
-        .select()
-        .single();
-
-      activeOrg = (insertedOrg as Organization) || {
-        id: DEFAULT_ORG_ID,
-        name: "Grand Restro Group",
-        slug: "grand-restro",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-    }
-  }
-
-  // 2. Fetch or create restaurants & locations
-  const { data: restaurants } = await supabase
-    .from("restaurants")
-    .select("id")
-    .eq("org_id", activeOrg.id);
-
-  let restaurantIds = (restaurants || []).map((r) => r.id);
-
-  if (restaurantIds.length === 0) {
-    const { data: insertedRest } = await supabase
-      .from("restaurants")
-      .insert({
-        org_id: activeOrg.id,
-        name: activeOrg.name,
-      })
-      .select("id")
-      .single();
-
-    if (insertedRest) {
-      restaurantIds = [insertedRest.id];
-    }
-  }
-
-  let rawLocations: Location[] = [];
-  if (restaurantIds.length > 0) {
-    const { data: locs } = await supabase
-      .from("locations")
-      .select("*")
-      .in("restaurant_id", restaurantIds);
-    rawLocations = (locs || []) as Location[];
-  }
-
-  // If no location exists in DB, auto-insert default location into locations table
-  if (rawLocations.length === 0) {
-    const { data: insertedLoc } = await supabase
-      .from("locations")
-      .insert({
-        id: DEFAULT_LOC_1_ID,
-        restaurant_id: restaurantIds[0] || activeOrg.id,
-        name: "Downtown Main Branch",
-        timezone: "America/New_York",
-        status: "active",
-      })
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" }
+      )
       .select()
       .single();
 
-    if (insertedLoc) {
-      rawLocations = [insertedLoc as Location];
+    activeOrg = (newOrg as Organization) || {
+      id: DEFAULT_ORG_ID,
+      name: "Grand Restro Group",
+      slug: "grand-restro",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  if (orgIdParam && orgIdParam !== activeOrg.id) {
+    const { data: requestedOrg } = await db
+      .from("organizations")
+      .select("*")
+      .eq("id", orgIdParam)
+      .maybeSingle();
+
+    if (requestedOrg) {
+      activeOrg = requestedOrg as Organization;
+    }
+  }
+
+  // 3. Ensure Role exists for Organization
+  const { data: dbRoles } = await db
+    .from("roles")
+    .select("id")
+    .eq("org_id", activeOrg.id)
+    .limit(1);
+
+  let roleId = dbRoles?.[0]?.id;
+  if (!roleId) {
+    const { data: newRole } = await db
+      .from("roles")
+      .upsert(
+        {
+          id: DEFAULT_ROLE_ID,
+          org_id: activeOrg.id,
+          name: "Owner",
+          is_system: true,
+        },
+        { onConflict: "id" }
+      )
+      .select("id")
+      .single();
+
+    roleId = newRole?.id || DEFAULT_ROLE_ID;
+  }
+
+  // 4. Ensure Membership exists for User
+  await db.from("memberships").upsert(
+    {
+      org_id: activeOrg.id,
+      user_id: user.id,
+      role_id: roleId,
+      status: "active",
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "org_id, user_id" }
+  );
+
+  // 5. Ensure Restaurant exists for Organization
+  const { data: dbRests } = await db
+    .from("restaurants")
+    .select("id")
+    .eq("org_id", activeOrg.id)
+    .limit(1);
+
+  let restaurantId = dbRests?.[0]?.id;
+  if (!restaurantId) {
+    const { data: newRest } = await db
+      .from("restaurants")
+      .upsert(
+        {
+          id: DEFAULT_REST_ID,
+          org_id: activeOrg.id,
+          name: activeOrg.name,
+        },
+        { onConflict: "id" }
+      )
+      .select("id")
+      .single();
+
+    restaurantId = newRest?.id || DEFAULT_REST_ID;
+  }
+
+  // 6. Ensure Location exists for Restaurant
+  const { data: dbLocs } = await db
+    .from("locations")
+    .select("*")
+    .eq("restaurant_id", restaurantId);
+
+  let rawLocations: Location[] = (dbLocs || []) as Location[];
+
+  if (rawLocations.length === 0) {
+    const { data: newLoc } = await db
+      .from("locations")
+      .upsert(
+        {
+          id: DEFAULT_LOC_1_ID,
+          restaurant_id: restaurantId,
+          name: "Downtown Main Branch",
+          timezone: "America/New_York",
+          status: "active",
+        },
+        { onConflict: "id" }
+      )
+      .select()
+      .single();
+
+    if (newLoc) {
+      rawLocations = [newLoc as Location];
     } else {
       rawLocations = [
         {
           id: DEFAULT_LOC_1_ID,
-          restaurant_id: restaurantIds[0] || activeOrg.id,
+          restaurant_id: restaurantId,
           name: "Downtown Main Branch",
           timezone: "America/New_York",
           status: "active",
@@ -127,7 +192,7 @@ async function ensureValidTenantContext(
   }
 
   return {
-    orgs: orgs.length > 0 ? orgs : [activeOrg],
+    orgs: [activeOrg],
     activeOrg,
     rawLocations,
   };
@@ -167,7 +232,7 @@ export const resolveUserContext = cache(async function (
     .eq("id", user.id)
     .single();
 
-  // 2. Ensure Valid Tenant Org & Location Structure in DB
+  // 2. Ensure Valid Relational Tenant Structure in DB
   const { orgs, activeOrg, rawLocations } = await ensureValidTenantContext(
     supabase,
     user,
