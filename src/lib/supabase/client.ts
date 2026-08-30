@@ -6,8 +6,10 @@ function sanitizeEnvVar(val?: string): string {
 }
 
 function sanitizeHeaderString(str: string): string {
-  // Percent-encode any character outside the ISO-8859-1 range (code point > 255)
-  return str.replace(/[^\x00-\xFF]/g, (c) => encodeURIComponent(c));
+  if (!str) return "";
+  return str
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[^\x00-\x7F]/g, (c) => encodeURIComponent(c));
 }
 
 function extractSanitizedHeaders(
@@ -28,6 +30,35 @@ function extractSanitizedHeaders(
         target[sanitizeHeaderString(key)] = sanitizeHeaderString(String(val));
       }
     });
+  }
+}
+
+// Global browser fetch patch to intercept all window.fetch calls
+if (typeof window !== "undefined" && typeof window.fetch === "function") {
+  const nativeFetch = window.fetch;
+  const globalObj = window as unknown as { _fetchPatched?: boolean };
+  if (!globalObj._fetchPatched) {
+    globalObj._fetchPatched = true;
+    window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+      let reqInit: RequestInit = init ? { ...init } : {};
+      const cleanHeaders: Record<string, string> = {};
+
+      if (typeof Request !== "undefined" && input instanceof Request) {
+        input.headers.forEach((val, key) => {
+          cleanHeaders[sanitizeHeaderString(key)] = sanitizeHeaderString(val);
+        });
+        if (reqInit.headers) {
+          extractSanitizedHeaders(reqInit.headers, cleanHeaders);
+        }
+        reqInit.headers = cleanHeaders;
+        input = input.url;
+      } else if (reqInit.headers) {
+        extractSanitizedHeaders(reqInit.headers, cleanHeaders);
+        reqInit.headers = cleanHeaders;
+      }
+
+      return nativeFetch.call(this, input, reqInit);
+    };
   }
 }
 
