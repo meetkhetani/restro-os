@@ -18,6 +18,90 @@ import {
 import { Order } from "@/domain/pos/types";
 
 /**
+ * Ensures an active location UUID exists in Supabase DB before inserting dependent records.
+ */
+async function ensureLocationInDb(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  targetOrgId: string,
+  preferredLocationId: string
+) {
+  // 1. Check if preferredLocationId already exists in locations table
+  if (preferredLocationId && preferredLocationId.includes("-") && preferredLocationId !== "all") {
+    const { data: directLoc } = await supabase
+      .from("locations")
+      .select("id, restaurant:restaurants(org_id)")
+      .eq("id", preferredLocationId)
+      .maybeSingle();
+
+    if (directLoc) {
+      const orgId = (directLoc.restaurant as unknown as { org_id: string })?.org_id || targetOrgId;
+      return { locationId: directLoc.id, orgId };
+    }
+  }
+
+  // 2. Check if ANY location exists in database
+  const { data: anyLocs } = await supabase
+    .from("locations")
+    .select("id, restaurant:restaurants(org_id)")
+    .limit(1);
+
+  if (anyLocs && anyLocs.length > 0) {
+    const orgId = (anyLocs[0].restaurant as unknown as { org_id: string })?.org_id || targetOrgId;
+    return { locationId: anyLocs[0].id, orgId };
+  }
+
+  // 3. Auto-provision organization -> restaurant -> location in DB if completely empty
+  const { data: orgs } = await supabase.from("organizations").select("id").limit(1);
+  let orgId = orgs?.[0]?.id || targetOrgId;
+
+  if (!orgs || orgs.length === 0) {
+    const { data: newOrg } = await supabase
+      .from("organizations")
+      .insert({
+        name: "Grand Restro Group",
+        slug: "grand-restro",
+      })
+      .select("id")
+      .single();
+
+    if (newOrg) orgId = newOrg.id;
+  }
+
+  const { data: rests } = await supabase.from("restaurants").select("id").eq("org_id", orgId).limit(1);
+  let restId = rests?.[0]?.id;
+
+  if (!restId) {
+    const { data: newRest } = await supabase
+      .from("restaurants")
+      .insert({
+        org_id: orgId,
+        name: "Main Restaurant",
+      })
+      .select("id")
+      .single();
+
+    if (newRest) restId = newRest.id;
+  }
+
+  if (restId) {
+    const { data: newLoc } = await supabase
+      .from("locations")
+      .insert({
+        restaurant_id: restId,
+        name: "Downtown Main Branch",
+        timezone: "America/New_York",
+        status: "active",
+      })
+      .select("id")
+      .single();
+
+    if (newLoc) return { locationId: newLoc.id, orgId };
+  }
+
+  return { locationId: preferredLocationId, orgId: targetOrgId };
+}
+
+/**
  * Fetch Floor Plan Tables, Active Orders, and Reservations concurrently for target branch context.
  */
 export async function getTablesAndFloorData(branchIdParam?: string) {
@@ -47,26 +131,29 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
     locationId = realBranch?.id || DEFAULT_LOC_1_ID;
   }
 
+  const resolved = await ensureLocationInDb(supabase, orgId, locationId);
+  locationId = resolved.locationId;
+
   // Concurrent Promise.all fetch for Tables, Active Orders, and Reservations
   const [tablesRes, activeOrdersRes, reservationsRes] = await Promise.all([
     supabase
       .from("tables")
       .select("*")
-      .eq("org_id", orgId)
+      .eq("org_id", resolved.orgId)
       .eq("location_id", locationId)
       .order("table_number", { ascending: true }),
 
     supabase
       .from("orders")
       .select("*, customer:customers(*), items:order_items(*)")
-      .eq("org_id", orgId)
+      .eq("org_id", resolved.orgId)
       .eq("location_id", locationId)
       .in("status", ["pending", "confirmed", "preparing", "ready"]),
 
     supabase
       .from("reservations")
       .select("*, table:tables(*)")
-      .eq("org_id", orgId)
+      .eq("org_id", resolved.orgId)
       .eq("location_id", locationId)
       .order("reservation_time", { ascending: true }),
   ]);
@@ -132,12 +219,13 @@ export async function createTable(input: CreateTableInput) {
     }
 
     const supabase = await createClient();
+    const resolved = await ensureLocationInDb(supabase, context.org.id, locationId);
 
     const { data: table, error } = await supabase
       .from("tables")
       .insert({
-        org_id: context.org.id,
-        location_id: locationId,
+        org_id: resolved.orgId,
+        location_id: resolved.locationId,
         table_number: input.table_number.trim(),
         capacity: input.capacity,
         floor_area: input.floor_area.trim() || "Main Floor",
@@ -355,12 +443,13 @@ export async function createReservation(input: CreateReservationInput) {
     }
 
     const supabase = await createClient();
+    const resolved = await ensureLocationInDb(supabase, context.org.id, locationId);
 
     const { data: reservation, error } = await supabase
       .from("reservations")
       .insert({
-        org_id: context.org.id,
-        location_id: locationId,
+        org_id: resolved.orgId,
+        location_id: resolved.locationId,
         customer_name: input.customer_name.trim(),
         customer_phone: input.customer_phone?.trim() || null,
         customer_email: input.customer_email?.trim() || null,
