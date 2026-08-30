@@ -91,6 +91,7 @@ export function Sidebar() {
                 <Link
                   key={item.name}
                   href={item.href}
+                  prefetch={true}
                   className={cn(
                     "flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-medium transition-all",
                     isActive
@@ -124,6 +125,7 @@ export function Sidebar() {
                 <Link
                   key={item.name}
                   href={item.href}
+                  prefetch={true}
                   className={cn(
                     "flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-medium transition-all",
                     isActive

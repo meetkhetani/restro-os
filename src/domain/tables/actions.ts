@@ -98,12 +98,10 @@ export async function getTablesAndFloorData(branchIdParam?: string) {
   const supabase = await createClient();
   const orgId = context.org.id;
 
-  let targetBranchId = context.selectedBranch?.id || "";
+  let branchId = context.selectedBranch?.id || DEFAULT_BRANCH_1_ID;
   if (branchIdParam && branchIdParam !== "all") {
-    targetBranchId = branchIdParam;
+    branchId = branchIdParam;
   }
-
-  const branchId = await resolveBranchAndFloorContext(supabase, orgId, targetBranchId);
 
   // Parallel execution for Floors, Tables, Orders, and Reservations
   const [floorsRes, tablesRes, activeOrdersRes, reservationsRes] = await Promise.all([
