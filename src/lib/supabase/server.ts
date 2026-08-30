@@ -1,14 +1,19 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
+function sanitizeEnvVar(val?: string): string {
+  if (!val) return "";
+  return val.trim().replace(/[^\x00-\x7F]/g, "").replace(/^["']|["']$/g, "");
+}
+
 /**
  * Creates a server-side Supabase client using Next.js async cookies.
  * Safe for use inside Server Components, Server Actions, and Route Handlers.
  */
 export async function createClient() {
   const cookieStore = await cookies();
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const supabaseUrl = sanitizeEnvVar(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const supabaseAnonKey = sanitizeEnvVar(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error(

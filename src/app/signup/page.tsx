@@ -31,6 +31,15 @@ export default function SignupPage() {
         password,
       });
 
+      if (!res.success) {
+        addToast({
+          type: "error",
+          title: "Registration Failed",
+          description: res.error || "Failed to provision organization account.",
+        });
+        return;
+      }
+
       addToast({
         type: "success",
         title: "Organization Provisioned",

@@ -1,5 +1,10 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+function sanitizeEnvVar(val?: string): string {
+  if (!val) return "";
+  return val.trim().replace(/[^\x00-\x7F]/g, "").replace(/^["']|["']$/g, "");
+}
+
 /**
  * Creates a privileged Supabase client using the Service Role Key.
  * EXCLUSIVELY FOR SERVER-SIDE USE (e.g. system provisioning, background webhooks).
@@ -12,8 +17,8 @@ export function createAdminClient() {
     );
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = sanitizeEnvVar(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const serviceRoleKey = sanitizeEnvVar(process.env.SUPABASE_SERVICE_ROLE_KEY);
 
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error(
