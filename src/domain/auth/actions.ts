@@ -2,8 +2,45 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { AuthSignupSchema, type AuthSignupInput } from "@/lib/validations";
+import {
+  AuthSignupSchema,
+  type AuthSignupInput,
+  AuthLoginSchema,
+  type AuthLoginInput,
+} from "@/lib/validations";
 import { User } from "@supabase/supabase-js";
+
+export async function signInWithCredentials(input: AuthLoginInput) {
+  try {
+    const validated = AuthLoginSchema.parse(input);
+    const supabase = await createClient();
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: validated.email,
+      password: validated.password,
+    });
+
+    if (error) {
+      return {
+        success: false,
+        error: error.message.includes("Invalid login credentials")
+          ? "Invalid email or password."
+          : error.message,
+      };
+    }
+
+    return {
+      success: true,
+      user: data.user,
+    };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : "Authentication failed.";
+    return {
+      success: false,
+      error: errorMsg,
+    };
+  }
+}
 
 export async function signUpWithOrganization(input: AuthSignupInput) {
   try {

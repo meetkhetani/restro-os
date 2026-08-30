@@ -19,35 +19,57 @@ export default function LoginPage() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Prevent multiple simultaneous login requests
+    if (isLoading) return;
+
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail || !password) {
+      addToast({
+        type: "error",
+        title: "Validation Error",
+        description: "Please fill in both email and password.",
+      });
+      return;
+    }
+
     setIsLoading(true);
 
     try {
       const supabase = createClient();
+
+      // Call Supabase Auth directly with normalized email and unmodified password
       const { error } = await supabase.auth.signInWithPassword({
-        email: email.trim(),
+        email: normalizedEmail,
         password,
       });
 
       if (error) {
-        const isUnconfirmed = error.message.toLowerCase().includes("email not confirmed");
-        const isHeaderError = error.message.toLowerCase().includes("non iso-8859-1 code point");
+        const lowerMsg = error.message.toLowerCase();
+        let toastTitle = "Authentication Failed";
+        let toastDescription = "Invalid email or password.";
+        let toastType: "error" | "warning" | "info" = "error";
 
-        if (isHeaderError) {
-          addToast({
-            type: "info",
-            title: "Demo Mode Enabled",
-            description: "Navigating to Operator Dashboard.",
-          });
-          router.push("/dashboard");
-          return;
+        if (lowerMsg.includes("email not confirmed")) {
+          toastTitle = "Email Verification Required";
+          toastDescription = "Your account email has not been verified yet. Check your inbox or disable 'Confirm email' in Supabase Auth settings.";
+          toastType = "warning";
+        } else if (lowerMsg.includes("invalid login credentials") || lowerMsg.includes("invalid credentials")) {
+          toastTitle = "Authentication Failed";
+          toastDescription = "Invalid email or password.";
+          toastType = "error";
+        } else if (lowerMsg.includes("fetch") || lowerMsg.includes("network") || lowerMsg.includes("failed to fetch")) {
+          toastTitle = "Connection Error";
+          toastDescription = "Unable to connect to authentication service.";
+          toastType = "error";
+        } else {
+          toastDescription = error.message;
         }
 
         addToast({
-          type: "warning",
-          title: isUnconfirmed ? "Email Verification Required" : "Authentication Failed",
-          description: isUnconfirmed
-            ? "Your account email has not been verified yet. Check your inbox or disable 'Confirm email' in Supabase Auth settings."
-            : error.message,
+          type: toastType,
+          title: toastTitle,
+          description: toastDescription,
         });
       } else {
         addToast({
@@ -57,13 +79,15 @@ export default function LoginPage() {
         });
         router.push("/dashboard");
       }
-    } catch {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
       addToast({
-        type: "info",
-        title: "Demo Mode Enabled",
-        description: "Navigating to Operator Dashboard.",
+        type: "error",
+        title: "Authentication Unavailable",
+        description: msg.includes("Missing Supabase")
+          ? "Authentication service is temporarily unavailable due to missing server configuration."
+          : "Unable to connect to authentication service.",
       });
-      router.push("/dashboard");
     } finally {
       setIsLoading(false);
     }
@@ -99,6 +123,7 @@ export default function LoginPage() {
                 placeholder="operator@restaurant.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                disabled={isLoading}
                 required
               />
               <Input
@@ -107,11 +132,12 @@ export default function LoginPage() {
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                disabled={isLoading}
                 required
               />
             </CardContent>
             <CardFooter className="flex flex-col space-y-3">
-              <Button type="submit" className="w-full" isLoading={isLoading}>
+              <Button type="submit" className="w-full" isLoading={isLoading} disabled={isLoading}>
                 Sign In to Platform <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
               <div className="text-center text-xs text-restro-500">

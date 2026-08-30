@@ -2,7 +2,11 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 function sanitizeEnvVar(val?: string): string {
   if (!val) return "";
-  return val.trim().replace(/[^\x00-\x7F]/g, "").replace(/^["']|["']$/g, "");
+  return val
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[^\x00-\x7F]/g, "");
 }
 
 /**
