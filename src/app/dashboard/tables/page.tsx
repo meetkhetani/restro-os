@@ -1,13 +1,26 @@
-import { Grid } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getTablesAndFloorData } from "@/domain/tables/actions";
+import { TablesPageClient } from "@/components/tables/TablesPageClient";
 
-export default function TablesPage() {
+export default async function TablesPage() {
+  const context = await resolveUserContext();
+  const initialData = await getTablesAndFloorData();
+
+  const currentBranchId = context.selectedBranch?.id || "all";
+  const branches = context.branches.map((b) => ({
+    id: b.id,
+    name: b.name,
+    isAll: b.isAll,
+  }));
+
   return (
-    <ModuleShell
-      title="Floor Plan & Table Management"
-      category="Operations"
-      description="Visual table occupancy, seating reservations, and floor layouts."
-      icon={<Grid className="h-5 w-5" />}
+    <TablesPageClient
+      initialTables={initialData.tables}
+      initialReservations={initialData.reservations}
+      initialFloorAreas={initialData.floorAreas}
+      initialStats={initialData.stats}
+      branches={branches}
+      currentBranchId={currentBranchId}
     />
   );
 }
