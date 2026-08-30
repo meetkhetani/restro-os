@@ -1,13 +1,24 @@
-import { ShoppingBag } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getPaginatedOrders } from "@/domain/orders/actions";
+import { OrdersView } from "@/components/orders/OrdersView";
 
-export default function OrdersPage() {
+export default async function OrdersPage() {
+  const context = await resolveUserContext();
+  const initialResult = await getPaginatedOrders({ date_range: "today", page: 1, page_size: 10 });
+
+  const currentBranchId = context.selectedBranch?.id || "all";
+  const branches = context.branches.map((b) => ({
+    id: b.id,
+    name: b.name,
+    isAll: b.isAll,
+  }));
+
   return (
-    <ModuleShell
-      title="Live Orders Management"
-      category="Operations"
-      description="Track dine-in, takeaway, and delivery orders across active branches."
-      icon={<ShoppingBag className="h-5 w-5" />}
+    <OrdersView
+      initialResult={initialResult}
+      branches={branches}
+      currentBranchId={currentBranchId}
+      isMultiBranchEntitled={context.isMultiBranchEntitled}
     />
   );
 }

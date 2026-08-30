@@ -153,6 +153,35 @@ export interface OrderItem {
   modifiers?: OrderItemModifier[];
 }
 
+export interface OrderEvent {
+  id: string;
+  order_id: string;
+  status: string;
+  actor_id?: string;
+  notes?: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  actor?: {
+    full_name: string;
+    email: string;
+  };
+}
+
+export interface Payment {
+  id: string;
+  org_id: string;
+  location_id: string;
+  order_id: string;
+  amount: number;
+  payment_method: PaymentMethod;
+  status: PaymentStatus;
+  transaction_reference?: string;
+  gateway_provider: string;
+  metadata?: Record<string, unknown>;
+  processed_at: string;
+  created_at: string;
+}
+
 export interface Order {
   id: string;
   org_id: string;
@@ -175,19 +204,39 @@ export interface Order {
   items?: OrderItem[];
   table?: TableItem;
   customer?: Customer;
+  payments?: Payment[];
+  events?: OrderEvent[];
+  location_name?: string;
 }
 
-export interface Payment {
-  id: string;
-  org_id: string;
-  location_id: string;
+export interface OrderQueryFilters {
+  search?: string;
+  order_type?: OrderType | "all";
+  status?: OrderStatus | "all";
+  branch_id?: string;
+  date_range?: "today" | "yesterday" | "7days" | "30days" | "all";
+  page?: number;
+  page_size?: number;
+}
+
+export interface PaginatedOrdersResult {
+  orders: Order[];
+  total_count: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  stats: {
+    total: number;
+    pending: number;
+    preparing: number;
+    ready: number;
+    completed: number;
+    cancelled: number;
+    total_revenue: number;
+  };
+}
+
+export interface CancelOrderInput {
   order_id: string;
-  amount: number;
-  payment_method: PaymentMethod;
-  status: PaymentStatus;
-  transaction_reference?: string;
-  gateway_provider: string;
-  metadata?: Record<string, unknown>;
-  processed_at: string;
-  created_at: string;
+  reason: string;
 }
