@@ -1,15 +1,31 @@
 -- Restro OS: Phase 12 Staff, Roles & Multi-Branch Permissions Migration
 -- Migration: 20260830000009_staff_roles_permissions.sql
 
--- 1. ENSURE ROLE CONSTRAINT ON MEMBERSHIPS HAS ALL STANDARD ROLES
+-- 1. ENSURE ROLE COLUMN AND CONSTRAINT ON MEMBERSHIPS HAVE ALL STANDARD ROLES
 DO $$
 BEGIN
+  -- Add role text column if it doesn't exist
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns WHERE table_name = 'memberships' AND column_name = 'role'
+  ) THEN
+    ALTER TABLE public.memberships ADD COLUMN role TEXT DEFAULT 'owner';
+  END IF;
+
+  -- Drop NOT NULL on legacy role_id if present
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns WHERE table_name = 'memberships' AND column_name = 'role_id'
+  ) THEN
+    ALTER TABLE public.memberships ALTER COLUMN role_id DROP NOT NULL;
+  END IF;
+
+  -- Drop existing role check constraint if present
   IF EXISTS (
     SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'memberships_role_check'
   ) THEN
     ALTER TABLE public.memberships DROP CONSTRAINT memberships_role_check;
   END IF;
 
+  -- Add role check constraint
   ALTER TABLE public.memberships ADD CONSTRAINT memberships_role_check
     CHECK (role IN ('owner', 'manager', 'cashier', 'kitchen', 'waiter', 'inventory_manager'));
 END $$;
