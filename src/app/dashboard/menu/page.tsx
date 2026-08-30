@@ -1,13 +1,21 @@
-import { Utensils } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getMenuCatalog } from "@/domain/menu/actions";
+import { MenuPageClient } from "@/components/menu/MenuPageClient";
 
-export default function MenuPage() {
+export default async function MenuPage() {
+  const context = await resolveUserContext();
+  const branchId = context.selectedBranch?.id || "";
+  const branchName = context.selectedBranch?.name || "Main Branch";
+
+  const res = await getMenuCatalog(branchId);
+
   return (
-    <ModuleShell
-      title="Menu & Item Recipe Catalog"
-      category="Management"
-      description="Manage dishes, categories, pricing, variants, and modifiers."
-      icon={<Utensils className="h-5 w-5" />}
+    <MenuPageClient
+      initialCategories={res.categories || []}
+      initialItems={res.items || []}
+      initialModifierGroups={res.modifierGroups || []}
+      currentBranchId={branchId}
+      branchName={branchName}
     />
   );
 }
