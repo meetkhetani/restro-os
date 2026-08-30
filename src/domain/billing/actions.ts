@@ -25,6 +25,7 @@ export interface BillingOverviewData {
   planConfig: PlanPriceConfig;
   invoices: BillingInvoice[];
   razorpayKeyId: string;
+  isCredentialsPresent: boolean;
 }
 
 /**
@@ -62,6 +63,9 @@ export async function getBillingOverview() {
       created_at: i.created_at,
     }));
 
+    const keyId = process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "";
+    const isCredentialsPresent = Boolean(keyId && process.env.RAZORPAY_KEY_SECRET);
+
     const overview: BillingOverviewData = {
       currentPlanCode,
       subscriptionStatus: subStatus,
@@ -70,7 +74,8 @@ export async function getBillingOverview() {
       maxBranches: planConfig.maxBranches,
       planConfig,
       invoices,
-      razorpayKeyId: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID || "rzp_test_mockKeyId123",
+      razorpayKeyId: keyId,
+      isCredentialsPresent,
     };
 
     return {
@@ -96,46 +101,60 @@ export async function createRazorpayOrder(
   billingCycle: "monthly" | "annual"
 ) {
   try {
+    console.log(`[BILLING_LOG] PAYMENT_START planCode=${planCode} cycle=${billingCycle}`);
+
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Organization context required." };
+    if (!context.org) {
+      return { success: false, errorCode: "UNAUTHENTICATED", error: "Organization context required." };
+    }
 
     const orgId = context.org.id;
     const planConfig = BILLING_PLANS_CONFIG[planCode];
     const amountInRupees = billingCycle === "annual" ? planConfig.annualPrice : planConfig.monthlyPrice;
     const amountInPaise = amountInRupees * 100;
 
-    const keyId = process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "rzp_test_mockKeyId123";
+    const keyId = process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
     const keySecret = process.env.RAZORPAY_KEY_SECRET;
 
-    let orderId: string;
+    if (!keyId || !keySecret) {
+      console.error("[BILLING_LOG] ORDER_CREATE_FAILED error=Razorpay credentials missing in environment");
+      return {
+        success: false,
+        errorCode: "RAZORPAY_CREDENTIALS_MISSING",
+        error: "Razorpay Key ID or Key Secret is missing. Please configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Vercel environment settings.",
+      };
+    }
 
-    // Call official Razorpay Orders API if live or test keys exist
-    if (keySecret && !keyId.includes("mockKeyId")) {
-      try {
-        const instance = new Razorpay({
-          key_id: keyId,
-          key_secret: keySecret,
-        });
+    console.log(`[BILLING_LOG] ORDER_CREATE_START orgId=${orgId} amount=${amountInPaise}`);
 
-        const order = await instance.orders.create({
-          amount: amountInPaise,
-          currency: planConfig.currency,
-          receipt: `rcpt_${orgId.substring(0, 8)}_${Date.now()}`,
-          notes: {
-            org_id: orgId,
-            plan_code: planCode,
-            billing_cycle: billingCycle,
-          },
-        });
+    // Call official Razorpay Orders API
+    let order: { id: string; amount: number; currency: string; status: string };
+    try {
+      const instance = new Razorpay({
+        key_id: keyId,
+        key_secret: keySecret,
+      });
 
-        orderId = order.id;
-      } catch (razorpayErr: unknown) {
-        console.error("Razorpay Order Creation API error:", razorpayErr);
-        // Fallback for sandbox / test environment
-        orderId = `order_test_${Date.now()}`;
-      }
-    } else {
-      orderId = `order_test_${Date.now()}`;
+      order = (await instance.orders.create({
+        amount: amountInPaise,
+        currency: planConfig.currency,
+        receipt: `rcpt_${orgId.substring(0, 8)}_${Date.now()}`,
+        notes: {
+          org_id: orgId,
+          plan_code: planCode,
+          billing_cycle: billingCycle,
+        },
+      })) as { id: string; amount: number; currency: string; status: string };
+
+      console.log(`[BILLING_LOG] ORDER_CREATE_SUCCESS orderId=${order.id} keyIdPrefix=${keyId.substring(0, 8)}`);
+    } catch (razorpayErr: unknown) {
+      const errorMsg = razorpayErr instanceof Error ? razorpayErr.message : "Razorpay API Order creation failed";
+      console.error(`[BILLING_LOG] ORDER_CREATE_FAILED error=${errorMsg}`);
+      return {
+        success: false,
+        errorCode: "ORDER_CREATION_FAILED",
+        error: `Razorpay API Order Creation Failed: ${errorMsg}`,
+      };
     }
 
     // Log pending invoice attempt in DB
@@ -151,15 +170,21 @@ export async function createRazorpayOrder(
     return {
       success: true,
       keyId,
-      orderId,
-      amount: amountInPaise,
-      currency: planConfig.currency,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
       planCode,
       orgName: context.org.name,
       userEmail: context.user?.email || "owner@restaurant.com",
     };
   } catch (err: unknown) {
-    return { success: false, error: err instanceof Error ? err.message : "Failed to create Razorpay Order." };
+    const errorMsg = err instanceof Error ? err.message : "Failed to create Razorpay Order";
+    console.error(`[BILLING_LOG] ORDER_CREATE_FAILED error=${errorMsg}`);
+    return {
+      success: false,
+      errorCode: "ORDER_CREATION_FAILED",
+      error: errorMsg,
+    };
   }
 }
 
@@ -174,28 +199,44 @@ export async function verifyRazorpayPaymentSignature(payload: {
   planCode: "standard" | "multi_branch";
 }) {
   try {
+    console.log(`[BILLING_LOG] VERIFICATION_START orderId=${payload.razorpay_order_id} paymentId=${payload.razorpay_payment_id}`);
+
     const context = await resolveUserContext();
-    if (!context.org) return { success: false, error: "Organization context required." };
+    if (!context.org) {
+      return { success: false, errorCode: "UNAUTHENTICATED", error: "Organization context required." };
+    }
 
     const razorpaySecret = process.env.RAZORPAY_KEY_SECRET;
+    if (!razorpaySecret) {
+      return {
+        success: false,
+        errorCode: "RAZORPAY_CREDENTIALS_MISSING",
+        error: "RAZORPAY_KEY_SECRET missing on server.",
+      };
+    }
 
     // Verify HMAC SHA256 signature using order_id + "|" + payment_id
-    if (razorpaySecret && payload.razorpay_signature && !payload.razorpay_order_id.startsWith("order_test_")) {
-      const signatureText = `${payload.razorpay_order_id}|${payload.razorpay_payment_id}`;
-      const generatedSignature = crypto
-        .createHmac("sha256", razorpaySecret)
-        .update(signatureText)
-        .digest("hex");
+    const signatureText = `${payload.razorpay_order_id}|${payload.razorpay_payment_id}`;
+    const generatedSignature = crypto
+      .createHmac("sha256", razorpaySecret)
+      .update(signatureText)
+      .digest("hex");
 
-      const isSignatureValid = crypto.timingSafeEqual(
-        Buffer.from(payload.razorpay_signature, "utf-8"),
-        Buffer.from(generatedSignature, "utf-8")
-      );
+    const isSignatureValid = crypto.timingSafeEqual(
+      Buffer.from(payload.razorpay_signature, "utf-8"),
+      Buffer.from(generatedSignature, "utf-8")
+    );
 
-      if (!isSignatureValid) {
-        return { success: false, error: "Razorpay HMAC signature verification failed. Invalid payment proof." };
-      }
+    if (!isSignatureValid) {
+      console.error(`[BILLING_LOG] VERIFICATION_FAILED orderId=${payload.razorpay_order_id} error=Invalid HMAC Signature`);
+      return {
+        success: false,
+        errorCode: "SIGNATURE_VERIFICATION_FAILED",
+        error: "Razorpay HMAC SHA256 signature verification failed. Invalid payment proof.",
+      };
     }
+
+    console.log(`[BILLING_LOG] VERIFICATION_SUCCESS orderId=${payload.razorpay_order_id}`);
 
     const supabase = await createClient();
     const orgId = context.org.id;
@@ -236,6 +277,8 @@ export async function verifyRazorpayPaymentSignature(payload: {
       }
     }
 
+    console.log(`[BILLING_LOG] SUBSCRIPTION_UPDATE_SUCCESS orgId=${orgId} planCode=${payload.planCode}`);
+
     // Update pending invoice to PAID
     const planConfig = BILLING_PLANS_CONFIG[payload.planCode];
     await supabase.from("billing_invoices").insert({
@@ -256,7 +299,13 @@ export async function verifyRazorpayPaymentSignature(payload: {
 
     return { success: true, planCode: payload.planCode };
   } catch (err: unknown) {
-    return { success: false, error: err instanceof Error ? err.message : "Payment verification failed." };
+    const errorMsg = err instanceof Error ? err.message : "Payment verification failed";
+    console.error(`[BILLING_LOG] VERIFICATION_FAILED error=${errorMsg}`);
+    return {
+      success: false,
+      errorCode: "SUBSCRIPTION_UPDATE_FAILED",
+      error: errorMsg,
+    };
   }
 }
 

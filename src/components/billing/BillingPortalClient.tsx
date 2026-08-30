@@ -7,6 +7,11 @@ import {
   Zap,
   ArrowRight,
   Receipt,
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  XCircle,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,6 +29,24 @@ interface BillingPortalClientProps {
   onRefresh: () => void;
 }
 
+export type PaymentLifecycleState =
+  | "IDLE"
+  | "CREATING_ORDER"
+  | "OPENING_CHECKOUT"
+  | "VERIFYING_PAYMENT"
+  | "SUCCESS"
+  | "FAILED"
+  | "CANCELLED";
+
+export type PaymentErrorCode =
+  | "ORDER_CREATION_FAILED"
+  | "CHECKOUT_CANCELLED"
+  | "PAYMENT_FAILED"
+  | "SIGNATURE_VERIFICATION_FAILED"
+  | "SUBSCRIPTION_UPDATE_FAILED"
+  | "RAZORPAY_CREDENTIALS_MISSING"
+  | "NETWORK_ERROR";
+
 declare global {
   interface Window {
     Razorpay: new (options: Record<string, unknown>) => { open: () => void };
@@ -37,7 +60,9 @@ export function BillingPortalClient({
   const { addToast } = useToast();
 
   const [billingCycle, setBillingCycle] = React.useState<"monthly" | "annual">("monthly");
-  const [isProcessing, setIsProcessing] = React.useState(false);
+  const [paymentState, setPaymentState] = React.useState<PaymentLifecycleState>("IDLE");
+  const [errorCode, setErrorCode] = React.useState<PaymentErrorCode | null>(null);
+  const [errorMessage, setErrorMessage] = React.useState<string>("");
 
   // Load Razorpay Checkout SDK Script
   React.useEffect(() => {
@@ -69,33 +94,52 @@ export function BillingPortalClient({
     maxBranches,
     invoices,
     razorpayKeyId,
+    isCredentialsPresent,
   } = initialOverview;
 
   const standardConfig = BILLING_PLANS_CONFIG.standard;
   const multiBranchConfig = BILLING_PLANS_CONFIG.multi_branch;
 
   const handleRazorpayCheckout = async (planCode: "standard" | "multi_branch") => {
-    setIsProcessing(true);
-
-    // Step 2-7: Server validates user, calculates amount, and creates Razorpay Order ID via Razorpay Orders API
-    const orderRes = await createRazorpayOrder(planCode, billingCycle);
-    if (!orderRes.success || !orderRes.orderId) {
-      setIsProcessing(false);
-      addToast({ type: "error", title: "Order Creation Failed", description: orderRes.error || "Could not initialize order." });
+    // Prevent duplicate clicks if already processing
+    if (paymentState === "CREATING_ORDER" || paymentState === "OPENING_CHECKOUT" || paymentState === "VERIFYING_PAYMENT") {
       return;
     }
 
-    const activeKeyId = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || razorpayKeyId || "rzp_test_mockKeyId123";
+    setPaymentState("CREATING_ORDER");
+    setErrorCode(null);
+    setErrorMessage("");
+
+    console.log(`[CLIENT_PAYMENT_LOG] STEP 1: PAYMENT_START planCode=${planCode}`);
+
+    // Step 2-7: Server validates user, calculates amount, and creates Razorpay Order ID via Razorpay Orders API
+    const orderRes = await createRazorpayOrder(planCode, billingCycle);
+
+    if (!orderRes.success || !orderRes.orderId) {
+      const errCode = (orderRes.errorCode as PaymentErrorCode) || "ORDER_CREATION_FAILED";
+      const errText = orderRes.error || "Could not create Razorpay Order on server.";
+      setPaymentState("FAILED");
+      setErrorCode(errCode);
+      setErrorMessage(errText);
+      console.error(`[CLIENT_PAYMENT_LOG] STEP 2 FAILED: ${errCode} - ${errText}`);
+      addToast({ type: "error", title: "Order Creation Failed", description: errText });
+      return;
+    }
+
+    console.log(`[CLIENT_PAYMENT_LOG] STEP 2: ORDER_CREATED orderId=${orderRes.orderId}`);
+    setPaymentState("OPENING_CHECKOUT");
+
+    const activeKeyId = orderRes.keyId || razorpayKeyId;
 
     // Step 8: Frontend configures Razorpay Checkout with server-provided order_id
     const options = {
       key: activeKeyId,
-      amount: orderRes.amount, // Amount in paise created on server
+      amount: orderRes.amount,
       currency: orderRes.currency || "INR",
       name: "Restro OS SaaS",
       description: `${planCode === "multi_branch" ? "Multi-Branch" : "Standard"} Plan Subscription (${billingCycle})`,
       image: "https://restro-os-nine.vercel.app/logo.png",
-      order_id: orderRes.orderId, // OFFICIAL RAZORPAY ORDER ID FROM SERVER!
+      order_id: orderRes.orderId, // OFFICIAL SERVER CREATED RAZORPAY ORDER ID!
       prefill: {
         email: orderRes.userEmail,
         contact: "9876543210",
@@ -103,22 +147,33 @@ export function BillingPortalClient({
       theme: {
         color: "#e11d48",
       },
-      // Step 9-10: Razorpay authorization callback returning payment proof to server
+      // Step 9-10: Razorpay payment callback
       handler: async (response: {
         razorpay_payment_id?: string;
         razorpay_order_id?: string;
         razorpay_signature?: string;
       }) => {
+        console.log(`[CLIENT_PAYMENT_LOG] STEP 3: CHECKOUT_SUCCESS paymentId=${response.razorpay_payment_id}`);
+        setPaymentState("VERIFYING_PAYMENT");
+
+        if (!response.razorpay_payment_id || !response.razorpay_order_id || !response.razorpay_signature) {
+          setPaymentState("FAILED");
+          setErrorCode("PAYMENT_FAILED");
+          setErrorMessage("Razorpay callback returned incomplete payment proof.");
+          return;
+        }
+
+        // Step 11-13: Server Signature Verification
         const verifyRes = await verifyRazorpayPaymentSignature({
-          razorpay_order_id: response.razorpay_order_id || orderRes.orderId!,
-          razorpay_payment_id: response.razorpay_payment_id || `pay_${Date.now()}`,
-          razorpay_signature: response.razorpay_signature || "test_signature",
+          razorpay_order_id: response.razorpay_order_id,
+          razorpay_payment_id: response.razorpay_payment_id,
+          razorpay_signature: response.razorpay_signature,
           planCode,
         });
 
-        setIsProcessing(false);
-
         if (verifyRes.success) {
+          console.log(`[CLIENT_PAYMENT_LOG] STEP 4: VERIFICATION_SUCCESS planCode=${planCode}`);
+          setPaymentState("SUCCESS");
           addToast({
             type: "success",
             title: "Subscription Verified & Active!",
@@ -126,12 +181,21 @@ export function BillingPortalClient({
           });
           onRefresh();
         } else {
-          addToast({ type: "error", title: "Signature Verification Failed", description: verifyRes.error });
+          const errCode = (verifyRes.errorCode as PaymentErrorCode) || "SIGNATURE_VERIFICATION_FAILED";
+          const errText = verifyRes.error || "Payment signature verification failed.";
+          console.error(`[CLIENT_PAYMENT_LOG] STEP 4 FAILED: ${errCode} - ${errText}`);
+          setPaymentState("FAILED");
+          setErrorCode(errCode);
+          setErrorMessage(errText);
+          addToast({ type: "error", title: "Signature Verification Failed", description: errText });
         }
       },
       modal: {
         ondismiss: () => {
-          setIsProcessing(false);
+          console.log("[CLIENT_PAYMENT_LOG] CHECKOUT_CANCELLED by user.");
+          setPaymentState("CANCELLED");
+          setErrorCode("CHECKOUT_CANCELLED");
+          setErrorMessage("Payment checkout window was closed by the user.");
         },
       },
     };
@@ -141,21 +205,25 @@ export function BillingPortalClient({
         const rzp = new window.Razorpay(options);
         rzp.open();
       } else {
-        addToast({ type: "error", title: "Razorpay SDK Unavailable", description: "Payment gateway script failed to load." });
-        setIsProcessing(false);
+        setPaymentState("FAILED");
+        setErrorCode("NETWORK_ERROR");
+        setErrorMessage("Razorpay Checkout SDK script was not loaded properly.");
       }
     } catch (err: unknown) {
-      console.error("Razorpay Modal Launch Exception:", err);
-      setIsProcessing(false);
+      const errText = err instanceof Error ? err.message : "Razorpay Checkout initialization error";
+      console.error(`[CLIENT_PAYMENT_LOG] CHECKOUT_LAUNCH_FAILED: ${errText}`);
+      setPaymentState("FAILED");
+      setErrorCode("PAYMENT_FAILED");
+      setErrorMessage(errText);
     }
   };
 
   const handleDowngrade = async () => {
     if (!confirm("Are you sure you want to downgrade to the Standard Plan? Existing branch data will be safely preserved.")) return;
 
-    setIsProcessing(true);
+    setPaymentState("CREATING_ORDER");
     const res = await safeDowngradeToStandard();
-    setIsProcessing(false);
+    setPaymentState("IDLE");
 
     if (res.success) {
       addToast({
@@ -169,6 +237,11 @@ export function BillingPortalClient({
     }
   };
 
+  const isProcessing =
+    paymentState === "CREATING_ORDER" ||
+    paymentState === "OPENING_CHECKOUT" ||
+    paymentState === "VERIFYING_PAYMENT";
+
   return (
     <div className="space-y-8 max-w-6xl mx-auto">
       {/* Header Bar */}
@@ -178,7 +251,7 @@ export function BillingPortalClient({
             <CreditCard className="h-6 w-6 text-brand-500" />
             SaaS Subscriptions & Billing Portal
             <span className="text-xs bg-brand-100 text-brand-700 font-bold px-2.5 py-0.5 rounded-full">
-              Razorpay Secured
+              Razorpay Standard Checkout
             </span>
           </h1>
           <p className="text-xs font-medium text-gray-500">
@@ -206,6 +279,75 @@ export function BillingPortalClient({
           </button>
         </div>
       </div>
+
+      {/* Payment Lifecycle Status Banners */}
+      {paymentState !== "IDLE" && (
+        <Card className="p-4 rounded-xl border shadow-sm space-y-2">
+          {isProcessing && (
+            <div className="flex items-center space-x-3 text-brand-700 bg-brand-50/50 p-3 rounded-lg border border-brand-200">
+              <Loader2 className="h-5 w-5 animate-spin text-brand-500 shrink-0" />
+              <div>
+                <h4 className="text-xs font-extrabold">
+                  {paymentState === "CREATING_ORDER" && "Step 1/3: Creating Secure Razorpay Order..."}
+                  {paymentState === "OPENING_CHECKOUT" && "Step 2/3: Opening Razorpay Checkout Window..."}
+                  {paymentState === "VERIFYING_PAYMENT" && "Step 3/3: Verifying HMAC SHA256 Signature with Server..."}
+                </h4>
+                <p className="text-[11px] text-gray-600">Please complete authorization in the Razorpay payment window.</p>
+              </div>
+            </div>
+          )}
+
+          {paymentState === "SUCCESS" && (
+            <div className="flex items-center space-x-3 text-emerald-800 bg-emerald-50 p-3 rounded-lg border border-emerald-200">
+              <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+              <div>
+                <h4 className="text-xs font-extrabold">Payment Verified & Subscription Active!</h4>
+                <p className="text-[11px] text-emerald-700">Entitlements synced with database.</p>
+              </div>
+            </div>
+          )}
+
+          {paymentState === "CANCELLED" && (
+            <div className="flex items-center justify-between text-amber-800 bg-amber-50 p-3 rounded-lg border border-amber-200">
+              <div className="flex items-center space-x-3">
+                <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0" />
+                <div>
+                  <h4 className="text-xs font-extrabold">Payment Checkout Cancelled</h4>
+                  <p className="text-[11px] text-amber-700">The Razorpay checkout window was closed before completion.</p>
+                </div>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => setPaymentState("IDLE")} className="text-xs font-bold">
+                Dismiss
+              </Button>
+            </div>
+          )}
+
+          {paymentState === "FAILED" && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-rose-900 bg-rose-50 p-4 rounded-lg border border-rose-200">
+              <div className="flex items-start space-x-3">
+                <XCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="text-xs font-extrabold flex items-center gap-2">
+                    Payment Operation Failed
+                    <span className="bg-rose-200 text-rose-900 font-mono text-[9px] px-2 py-0.5 rounded font-black">
+                      {errorCode || "PAYMENT_FAILED"}
+                    </span>
+                  </h4>
+                  <p className="text-xs text-rose-700 font-medium">{errorMessage}</p>
+                </div>
+              </div>
+
+              <Button
+                size="sm"
+                onClick={() => setPaymentState("IDLE")}
+                className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shrink-0"
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Retry Payment
+              </Button>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Subscription Overview Card */}
       <Card className="bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 text-white rounded-2xl p-6 shadow-xl">
@@ -325,7 +467,15 @@ export function BillingPortalClient({
                 disabled={isProcessing}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold shadow-md"
               >
-                {isProcessing ? "Initializing Order..." : "Upgrade via Razorpay 💳"} <ArrowRight className="h-4 w-4 ml-1.5" />
+                {isProcessing ? (
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Starting secure payment...
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5">
+                    Upgrade via Razorpay 💳 <ArrowRight className="h-4 w-4 ml-1" />
+                  </span>
+                )}
               </Button>
             )}
           </div>
