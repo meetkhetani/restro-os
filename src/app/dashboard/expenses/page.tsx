@@ -1,13 +1,20 @@
-import { Receipt } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getExpensesOverview } from "@/domain/finance/actions";
+import { ExpensesPageClient } from "@/components/finance/ExpensesPageClient";
 
-export default function ExpensesPage() {
+export default async function ExpensesPage() {
+  const context = await resolveUserContext();
+  const branchId = context.selectedBranch?.id || "";
+  const branchName = context.selectedBranch?.name || "Main Branch";
+
+  const res = await getExpensesOverview(branchId);
+
   return (
-    <ModuleShell
-      title="Store Expenses & Petty Cash"
-      category="Finance"
-      description="Track operational expenses, utility bills, and daily payouts."
-      icon={<Receipt className="h-5 w-5" />}
+    <ExpensesPageClient
+      initialExpenses={res.expenses || []}
+      totalExpense={res.totalExpense || 0}
+      branchName={branchName}
+      branchId={branchId}
     />
   );
 }
