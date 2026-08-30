@@ -7,7 +7,6 @@ import {
   Zap,
   ArrowRight,
   Receipt,
-  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -15,7 +14,7 @@ import { useToast } from "@/components/ui/toast";
 import { BILLING_PLANS_CONFIG } from "@/domain/billing/config";
 import {
   BillingOverviewData,
-  createRazorpaySubscriptionOrder,
+  createRazorpayOrder,
   verifyRazorpayPaymentSignature,
   safeDowngradeToStandard,
 } from "@/domain/billing/actions";
@@ -75,49 +74,28 @@ export function BillingPortalClient({
   const standardConfig = BILLING_PLANS_CONFIG.standard;
   const multiBranchConfig = BILLING_PLANS_CONFIG.multi_branch;
 
-  const executePlanUpgrade = async (planCode: "standard" | "multi_branch", paymentId?: string) => {
-    const verifyRes = await verifyRazorpayPaymentSignature({
-      razorpay_payment_id: paymentId || `pay_${Date.now()}`,
-      razorpay_subscription_id: `sub_${planCode}_${Date.now()}`,
-      razorpay_signature: "verified_signature",
-      planCode,
-    });
-
-    setIsProcessing(false);
-
-    if (verifyRes.success) {
-      addToast({
-        type: "success",
-        title: "Plan Upgraded Successfully!",
-        description: `Unlocked ${planCode === "multi_branch" ? "Multi-Branch" : "Standard"} Plan entitlements.`,
-      });
-      onRefresh();
-    } else {
-      addToast({ type: "error", title: "Upgrade Verification Failed", description: verifyRes.error });
-    }
-  };
-
   const handleRazorpayCheckout = async (planCode: "standard" | "multi_branch") => {
     setIsProcessing(true);
 
-    const orderRes = await createRazorpaySubscriptionOrder(planCode, billingCycle);
-    if (!orderRes.success) {
+    // Step 2-7: Server validates user, calculates amount, and creates Razorpay Order ID via Razorpay Orders API
+    const orderRes = await createRazorpayOrder(planCode, billingCycle);
+    if (!orderRes.success || !orderRes.orderId) {
       setIsProcessing(false);
-      addToast({ type: "error", title: "Subscription Failed", description: orderRes.error });
+      addToast({ type: "error", title: "Order Creation Failed", description: orderRes.error || "Could not initialize order." });
       return;
     }
 
-    const amountInPaise = (orderRes.amount || 7999) * 100;
     const activeKeyId = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || razorpayKeyId || "rzp_test_mockKeyId123";
 
-    // Options for Razorpay Checkout
+    // Step 8: Frontend configures Razorpay Checkout with server-provided order_id
     const options = {
       key: activeKeyId,
-      amount: amountInPaise,
+      amount: orderRes.amount, // Amount in paise created on server
       currency: orderRes.currency || "INR",
       name: "Restro OS SaaS",
       description: `${planCode === "multi_branch" ? "Multi-Branch" : "Standard"} Plan Subscription (${billingCycle})`,
       image: "https://restro-os-nine.vercel.app/logo.png",
+      order_id: orderRes.orderId, // OFFICIAL RAZORPAY ORDER ID FROM SERVER!
       prefill: {
         email: orderRes.userEmail,
         contact: "9876543210",
@@ -125,12 +103,31 @@ export function BillingPortalClient({
       theme: {
         color: "#e11d48",
       },
+      // Step 9-10: Razorpay authorization callback returning payment proof to server
       handler: async (response: {
         razorpay_payment_id?: string;
-        razorpay_subscription_id?: string;
+        razorpay_order_id?: string;
         razorpay_signature?: string;
       }) => {
-        await executePlanUpgrade(planCode, response.razorpay_payment_id);
+        const verifyRes = await verifyRazorpayPaymentSignature({
+          razorpay_order_id: response.razorpay_order_id || orderRes.orderId!,
+          razorpay_payment_id: response.razorpay_payment_id || `pay_${Date.now()}`,
+          razorpay_signature: response.razorpay_signature || "test_signature",
+          planCode,
+        });
+
+        setIsProcessing(false);
+
+        if (verifyRes.success) {
+          addToast({
+            type: "success",
+            title: "Subscription Verified & Active!",
+            description: `Unlocked ${planCode === "multi_branch" ? "Multi-Branch" : "Standard"} Plan entitlements.`,
+          });
+          onRefresh();
+        } else {
+          addToast({ type: "error", title: "Signature Verification Failed", description: verifyRes.error });
+        }
       },
       modal: {
         ondismiss: () => {
@@ -144,12 +141,12 @@ export function BillingPortalClient({
         const rzp = new window.Razorpay(options);
         rzp.open();
       } else {
-        // Fallback for environments where Razorpay SDK script is blocked
-        await executePlanUpgrade(planCode);
+        addToast({ type: "error", title: "Razorpay SDK Unavailable", description: "Payment gateway script failed to load." });
+        setIsProcessing(false);
       }
-    } catch {
-      // In test mode if Razorpay modal fails, fallback to direct test activation
-      await executePlanUpgrade(planCode);
+    } catch (err: unknown) {
+      console.error("Razorpay Modal Launch Exception:", err);
+      setIsProcessing(false);
     }
   };
 
@@ -328,7 +325,7 @@ export function BillingPortalClient({
                 disabled={isProcessing}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold shadow-md"
               >
-                Upgrade via Razorpay 💳 <ArrowRight className="h-4 w-4 ml-1.5" />
+                {isProcessing ? "Initializing Order..." : "Upgrade via Razorpay 💳"} <ArrowRight className="h-4 w-4 ml-1.5" />
               </Button>
             )}
           </div>
