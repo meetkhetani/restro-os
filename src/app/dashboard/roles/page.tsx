@@ -1,13 +1,8 @@
-import { ShieldCheck } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { getRolePermissionsMatrix } from "@/domain/staff/actions";
+import { RolesMatrixClient } from "@/components/roles/RolesMatrixClient";
 
-export default function RolesPage() {
-  return (
-    <ModuleShell
-      title="Users & Role-Based Access Control (RBAC)"
-      category="Administration"
-      description="Manage system permissions, user invitations, and access control levels."
-      icon={<ShieldCheck className="h-5 w-5" />}
-    />
-  );
+export default async function RolesPage() {
+  const res = await getRolePermissionsMatrix();
+
+  return <RolesMatrixClient matrix={res.matrix || []} />;
 }

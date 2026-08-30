@@ -1,13 +1,15 @@
-import { UserCheck } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getStaffOverview } from "@/domain/staff/actions";
+import { StaffPageClient } from "@/components/staff/StaffPageClient";
 
-export default function StaffPage() {
+export default async function StaffPage() {
+  const context = await resolveUserContext();
+  const res = await getStaffOverview();
+
   return (
-    <ModuleShell
-      title="Staff Management & Shifts"
-      category="Management"
-      description="Employee roster, shift scheduling, and branch assignments."
-      icon={<UserCheck className="h-5 w-5" />}
+    <StaffPageClient
+      initialStaff={res.staff || []}
+      availableBranches={res.branches || []}
     />
   );
 }
