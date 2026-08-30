@@ -34,7 +34,7 @@ export async function getPosInitialData() {
 
   const supabase = await createClient();
   const orgId = context.org.id;
-  const locationId = context.selectedBranch.id;
+  const branchId = context.selectedBranch.id;
 
   // Execute all POS queries concurrently using Promise.all to eliminate sequential network roundtrips
   const [categoriesRes, menuItemsRes, modifierGroupsRes, tablesRes, customersRes] =
@@ -60,7 +60,7 @@ export async function getPosInitialData() {
         .from("tables")
         .select("*")
         .eq("org_id", orgId)
-        .eq("location_id", locationId)
+        .eq("branch_id", branchId)
         .order("table_number", { ascending: true }),
 
       supabase
@@ -117,7 +117,7 @@ export async function createOrder(input: CreateOrderInput) {
     }
 
     const orgId = context.org.id;
-    const locationId = context.selectedBranch.id;
+    const branchId = context.selectedBranch.id;
     const userId = context.user?.id;
 
     // Financial Calculation Server-Side
@@ -131,7 +131,7 @@ export async function createOrder(input: CreateOrderInput) {
       .from("orders")
       .insert({
         org_id: orgId,
-        location_id: locationId,
+        branch_id: branchId,
         order_number: orderNumber,
         order_type: input.order_type,
         status: "pending",

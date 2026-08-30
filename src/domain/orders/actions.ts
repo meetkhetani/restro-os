@@ -45,12 +45,12 @@ export async function getPaginatedOrders(
 
   // Determine Branch Scoping:
   // If user is entitled to Multi-Branch and requests specific branch or 'all'
-  let targetLocationId: string | null = null;
+  let targetBranchId: string | null = null;
 
   if (filters.branch_id && filters.branch_id !== "all") {
-    targetLocationId = filters.branch_id;
+    targetBranchId = filters.branch_id;
   } else if (!context.isMultiBranchEntitled && context.selectedBranch) {
-    targetLocationId = context.selectedBranch.id;
+    targetBranchId = context.selectedBranch.id;
   }
 
   // Base Query Builder for Stats
@@ -59,8 +59,8 @@ export async function getPaginatedOrders(
     .select("status, total_amount, created_at, order_number, order_type", { count: "exact" })
     .eq("org_id", orgId);
 
-  if (targetLocationId) {
-    statsQuery = statsQuery.eq("location_id", targetLocationId);
+  if (targetBranchId) {
+    statsQuery = statsQuery.eq("branch_id", targetBranchId);
   }
 
   // Date Range Filtering
@@ -107,8 +107,8 @@ export async function getPaginatedOrders(
     )
     .eq("org_id", orgId);
 
-  if (targetLocationId) {
-    query = query.eq("location_id", targetLocationId);
+  if (targetBranchId) {
+    query = query.eq("branch_id", targetBranchId);
   }
 
   if (filters.order_type && filters.order_type !== "all") {
