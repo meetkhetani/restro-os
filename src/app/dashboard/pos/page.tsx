@@ -1,13 +1,17 @@
-import { Monitor } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { getPosInitialData } from "@/domain/pos/actions";
+import { PosTerminalView } from "@/components/pos/PosTerminalView";
 
-export default function POSPage() {
+export default async function POSPage() {
+  const initialData = await getPosInitialData();
+
   return (
-    <ModuleShell
-      title="Point of Sale (POS) Terminal Shell"
-      category="Operations"
-      description="High-speed order entry and cash register interface foundation."
-      icon={<Monitor className="h-5 w-5" />}
+    <PosTerminalView
+      initialCategories={initialData.categories}
+      initialMenuItems={initialData.menuItems}
+      initialTables={initialData.tables}
+      initialCustomers={initialData.customers}
+      activeLocationName={initialData.activeLocation?.name || "Main Branch"}
+      activeRestaurantName={initialData.activeRestaurant?.name || "Restro OS Store"}
     />
   );
 }
