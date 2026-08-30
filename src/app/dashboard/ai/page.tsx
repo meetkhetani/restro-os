@@ -1,13 +1,17 @@
-import { Sparkles } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { AiAssistantPageClient } from "@/components/ai/AiAssistantPageClient";
 
-export default function AIPage() {
+export default async function AIPage() {
+  const context = await resolveUserContext();
+  const branchId = context.selectedBranch?.id || "";
+  const branchName = context.selectedBranch?.name || "Main Branch";
+  const isMultiBranch = context.plan?.code === "multi_branch" || (context.plan?.max_branches || 1) > 1;
+
   return (
-    <ModuleShell
-      title="Restro OS AI Assistant & Intelligence Copilot"
-      category="Intelligence"
-      description="Operational demand forecasting, menu optimization, and automated insights."
-      icon={<Sparkles className="h-5 w-5" />}
+    <AiAssistantPageClient
+      currentBranchId={branchId}
+      branchName={branchName}
+      isMultiBranch={isMultiBranch}
     />
   );
 }
