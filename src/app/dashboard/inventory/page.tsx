@@ -1,13 +1,22 @@
-import { Boxes } from "lucide-react";
-import { ModuleShell } from "@/components/dashboard/ModuleShell";
+import { resolveUserContext } from "@/domain/context/service";
+import { getBranchInventory } from "@/domain/inventory/actions";
+import { InventoryPageClient } from "@/components/inventory/InventoryPageClient";
 
-export default function InventoryPage() {
+export default async function InventoryPage() {
+  const context = await resolveUserContext();
+  const branchId = context.selectedBranch?.id || "";
+  const branchName = context.selectedBranch?.name || "Main Branch";
+
+  const res = await getBranchInventory(branchId);
+
   return (
-    <ModuleShell
-      title="Stock & Inventory Control"
-      category="Management"
-      description="Raw ingredient tracking, stock levels, waste management, and reorder alerts."
-      icon={<Boxes className="h-5 w-5" />}
+    <InventoryPageClient
+      initialInventory={res.inventory || []}
+      initialIngredients={res.ingredients || []}
+      initialMovements={res.movements || []}
+      initialTransfers={res.transfers || []}
+      currentBranchId={branchId}
+      branchName={branchName}
     />
   );
 }
