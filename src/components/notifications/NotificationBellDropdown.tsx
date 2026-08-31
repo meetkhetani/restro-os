@@ -13,7 +13,6 @@ import {
   Info,
   X,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -33,11 +32,15 @@ export function NotificationBellDropdown() {
   const [orgId, setOrgId] = React.useState<string>("");
 
   const fetchLatest = async () => {
-    const res = await getNotificationsOverview();
-    if (res.success) {
-      setNotifications(res.notifications || []);
-      setUnreadCount(res.unreadCount || 0);
-      if (res.orgId) setOrgId(res.orgId);
+    try {
+      const res = await getNotificationsOverview();
+      if (res.success) {
+        setNotifications(res.notifications || []);
+        setUnreadCount(res.unreadCount || 0);
+        if (res.orgId) setOrgId(res.orgId);
+      }
+    } catch (err) {
+      console.warn("Notifications fetch bypassed:", err);
     }
   };
 
@@ -45,37 +48,47 @@ export function NotificationBellDropdown() {
     fetchLatest();
   }, []);
 
-  // Supabase Realtime Channel Subscription
+  // Supabase Realtime Channel Subscription with safe error boundary
   React.useEffect(() => {
     if (!orgId) return;
 
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`org_notifications_${orgId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "notifications",
-          filter: `org_id=eq.${orgId}`,
-        },
-        (payload) => {
-          const newNotif = payload.new as NotificationRecord;
-          setNotifications((prev) => [newNotif, ...prev]);
-          setUnreadCount((prev) => prev + 1);
-          addToast({
-            type: "info",
-            title: newNotif.title,
-            description: newNotif.message,
-          });
-        }
-      )
-      .subscribe();
+    try {
+      const supabase = createClient();
+      const channel = supabase
+        .channel(`org_notifications_${orgId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `org_id=eq.${orgId}`,
+          },
+          (payload) => {
+            const newNotif = payload.new as NotificationRecord;
+            setNotifications((prev) => [newNotif, ...prev]);
+            setUnreadCount((prev) => prev + 1);
+            if (addToast) {
+              addToast({
+                type: "info",
+                title: newNotif.title,
+                description: newNotif.message,
+              });
+            }
+          }
+        )
+        .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+      return () => {
+        try {
+          supabase.removeChannel(channel);
+        } catch {
+          // ignore cleanup error
+        }
+      };
+    } catch (err) {
+      console.warn("Realtime subscription bypassed:", err);
+    }
   }, [orgId, addToast]);
 
   const handleMarkAsRead = async (id: string) => {
@@ -90,7 +103,9 @@ export function NotificationBellDropdown() {
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
     setUnreadCount(0);
     await markAllNotificationsAsRead();
-    addToast({ type: "success", title: "All Notifications Cleared" });
+    if (addToast) {
+      addToast({ type: "success", title: "All Notifications Cleared" });
+    }
   };
 
   const getNotificationIcon = (type: NotificationType) => {
