@@ -12,6 +12,7 @@ import {
   Loader2,
   XCircle,
   RefreshCw,
+  Code2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -22,6 +23,7 @@ import {
   createRazorpayOrder,
   verifyRazorpayPaymentSignature,
   safeDowngradeToStandard,
+  RazorpayOrderErrorPayload,
 } from "@/domain/billing/actions";
 
 interface BillingPortalClientProps {
@@ -45,6 +47,7 @@ export type PaymentErrorCode =
   | "SIGNATURE_VERIFICATION_FAILED"
   | "SUBSCRIPTION_UPDATE_FAILED"
   | "RAZORPAY_CREDENTIALS_MISSING"
+  | "UNAUTHENTICATED"
   | "NETWORK_ERROR";
 
 declare global {
@@ -63,6 +66,12 @@ export function BillingPortalClient({
   const [paymentState, setPaymentState] = React.useState<PaymentLifecycleState>("IDLE");
   const [errorCode, setErrorCode] = React.useState<PaymentErrorCode | null>(null);
   const [errorMessage, setErrorMessage] = React.useState<string>("");
+  const [providerDetails, setProviderDetails] = React.useState<{
+    providerCode?: string;
+    providerDescription?: string;
+    providerField?: string | null;
+    httpStatus?: number;
+  }>({});
 
   // Load Razorpay Checkout SDK Script
   React.useEffect(() => {
@@ -109,39 +118,50 @@ export function BillingPortalClient({
     setPaymentState("CREATING_ORDER");
     setErrorCode(null);
     setErrorMessage("");
+    setProviderDetails({});
 
     console.log(`[CLIENT_PAYMENT_LOG] STEP 1: PAYMENT_START planCode=${planCode}`);
 
     // Step 2-7: Server validates user, calculates amount, and creates Razorpay Order ID via Razorpay Orders API
     const orderRes = await createRazorpayOrder(planCode, billingCycle);
 
-    if (!orderRes.success || !orderRes.orderId) {
-      const errCode = (orderRes.errorCode as PaymentErrorCode) || "ORDER_CREATION_FAILED";
-      const errText = orderRes.error || "Could not create Razorpay Order on server.";
+    if (!orderRes.success) {
+      const errPayload = orderRes as RazorpayOrderErrorPayload;
+      const errCode = errPayload.errorCode || "ORDER_CREATION_FAILED";
+      const errText = errPayload.error || "Could not create Razorpay Order on server.";
+
       setPaymentState("FAILED");
       setErrorCode(errCode);
       setErrorMessage(errText);
-      console.error(`[CLIENT_PAYMENT_LOG] STEP 2 FAILED: ${errCode} - ${errText}`);
+      setProviderDetails({
+        providerCode: errPayload.providerCode,
+        providerDescription: errPayload.providerDescription,
+        providerField: errPayload.providerField,
+        httpStatus: errPayload.httpStatus,
+      });
+
+      console.error("[CLIENT_PAYMENT_LOG] STEP 2 FAILED:", errPayload);
       addToast({ type: "error", title: "Order Creation Failed", description: errText });
       return;
     }
 
-    console.log(`[CLIENT_PAYMENT_LOG] STEP 2: ORDER_CREATED orderId=${orderRes.orderId}`);
+    const orderSuccess = orderRes;
+    console.log(`[CLIENT_PAYMENT_LOG] STEP 2: ORDER_CREATED orderId=${orderSuccess.orderId}`);
     setPaymentState("OPENING_CHECKOUT");
 
-    const activeKeyId = orderRes.keyId || razorpayKeyId;
+    const activeKeyId = orderSuccess.keyId || razorpayKeyId;
 
     // Step 8: Frontend configures Razorpay Checkout with server-provided order_id
     const options = {
       key: activeKeyId,
-      amount: orderRes.amount,
-      currency: orderRes.currency || "INR",
+      amount: orderSuccess.amount,
+      currency: orderSuccess.currency || "INR",
       name: "Restro OS SaaS",
       description: `${planCode === "multi_branch" ? "Multi-Branch" : "Standard"} Plan Subscription (${billingCycle})`,
       image: "https://restro-os-nine.vercel.app/logo.png",
-      order_id: orderRes.orderId, // OFFICIAL SERVER CREATED RAZORPAY ORDER ID!
+      order_id: orderSuccess.orderId, // OFFICIAL SERVER CREATED RAZORPAY ORDER ID!
       prefill: {
-        email: orderRes.userEmail,
+        email: orderSuccess.userEmail,
         contact: "9876543210",
       },
       theme: {
@@ -181,11 +201,10 @@ export function BillingPortalClient({
           });
           onRefresh();
         } else {
-          const errCode = (verifyRes.errorCode as PaymentErrorCode) || "SIGNATURE_VERIFICATION_FAILED";
           const errText = verifyRes.error || "Payment signature verification failed.";
-          console.error(`[CLIENT_PAYMENT_LOG] STEP 4 FAILED: ${errCode} - ${errText}`);
+          console.error(`[CLIENT_PAYMENT_LOG] STEP 4 FAILED: ${errText}`);
           setPaymentState("FAILED");
-          setErrorCode(errCode);
+          setErrorCode("SIGNATURE_VERIFICATION_FAILED");
           setErrorMessage(errText);
           addToast({ type: "error", title: "Signature Verification Failed", description: errText });
         }
@@ -288,7 +307,7 @@ export function BillingPortalClient({
               <Loader2 className="h-5 w-5 animate-spin text-brand-500 shrink-0" />
               <div>
                 <h4 className="text-xs font-extrabold">
-                  {paymentState === "CREATING_ORDER" && "Step 1/3: Creating Secure Razorpay Order..."}
+                  {paymentState === "CREATING_ORDER" && "Step 1/3: Creating Secure Razorpay Order (POST /v1/orders)..."}
                   {paymentState === "OPENING_CHECKOUT" && "Step 2/3: Opening Razorpay Checkout Window..."}
                   {paymentState === "VERIFYING_PAYMENT" && "Step 3/3: Verifying HMAC SHA256 Signature with Server..."}
                 </h4>
@@ -323,27 +342,46 @@ export function BillingPortalClient({
           )}
 
           {paymentState === "FAILED" && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-rose-900 bg-rose-50 p-4 rounded-lg border border-rose-200">
-              <div className="flex items-start space-x-3">
-                <XCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <h4 className="text-xs font-extrabold flex items-center gap-2">
-                    Payment Operation Failed
-                    <span className="bg-rose-200 text-rose-900 font-mono text-[9px] px-2 py-0.5 rounded font-black">
-                      {errorCode || "PAYMENT_FAILED"}
-                    </span>
-                  </h4>
-                  <p className="text-xs text-rose-700 font-medium">{errorMessage}</p>
+            <div className="flex flex-col space-y-3 text-rose-900 bg-rose-50 p-4 rounded-lg border border-rose-200">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start space-x-3">
+                  <XCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <h4 className="text-xs font-extrabold flex items-center gap-2">
+                      Order Creation / Payment Failed
+                      <span className="bg-rose-200 text-rose-900 font-mono text-[9px] px-2 py-0.5 rounded font-black">
+                        {errorCode || "PAYMENT_FAILED"}
+                      </span>
+                    </h4>
+                    <p className="text-xs text-rose-800 font-medium">{errorMessage}</p>
+                  </div>
                 </div>
+
+                <Button
+                  size="sm"
+                  onClick={() => setPaymentState("IDLE")}
+                  className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shrink-0"
+                >
+                  <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Retry Payment
+                </Button>
               </div>
 
-              <Button
-                size="sm"
-                onClick={() => setPaymentState("IDLE")}
-                className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shrink-0"
-              >
-                <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Retry Payment
-              </Button>
+              {/* Structured Provider Diagnostics Display */}
+              {(providerDetails.providerCode || providerDetails.httpStatus) && (
+                <div className="p-3 bg-white rounded-lg border border-rose-200 text-[11px] font-mono space-y-1 text-gray-800">
+                  <div className="font-bold text-rose-900 flex items-center gap-1.5">
+                    <Code2 className="h-3.5 w-3.5 text-rose-600" /> Razorpay Provider Diagnostic Details:
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div><span className="font-bold text-gray-500">HTTP Status:</span> {providerDetails.httpStatus || "N/A"}</div>
+                    <div><span className="font-bold text-gray-500">Error Code:</span> {providerDetails.providerCode || "N/A"}</div>
+                    <div className="col-span-2"><span className="font-bold text-gray-500">Description:</span> {providerDetails.providerDescription || "N/A"}</div>
+                    {providerDetails.providerField && (
+                      <div className="col-span-2"><span className="font-bold text-gray-500">Invalid Field:</span> {providerDetails.providerField}</div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </Card>

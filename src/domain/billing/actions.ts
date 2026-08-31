@@ -1,7 +1,6 @@
 "use server";
 
 import crypto from "crypto";
-import Razorpay from "razorpay";
 import { createClient } from "@/lib/supabase/server";
 import { resolveUserContext } from "../context/service";
 import { BILLING_PLANS_CONFIG, PlanPriceConfig } from "./config";
@@ -27,6 +26,33 @@ export interface BillingOverviewData {
   razorpayKeyId: string;
   isCredentialsPresent: boolean;
 }
+
+export interface RazorpayOrderErrorPayload {
+  success: false;
+  errorCode: "ORDER_CREATION_FAILED" | "RAZORPAY_CREDENTIALS_MISSING" | "UNAUTHENTICATED";
+  provider: "razorpay";
+  providerCode?: string;
+  providerDescription?: string;
+  providerField?: string | null;
+  providerSource?: string | null;
+  providerStep?: string | null;
+  providerReason?: string | null;
+  httpStatus?: number;
+  error: string;
+}
+
+export interface RazorpayOrderSuccessPayload {
+  success: true;
+  keyId: string;
+  orderId: string;
+  amount: number;
+  currency: string;
+  planCode: "standard" | "multi_branch";
+  orgName: string;
+  userEmail: string;
+}
+
+export type CreateRazorpayOrderResult = RazorpayOrderSuccessPayload | RazorpayOrderErrorPayload;
 
 /**
  * Server Action: Fetch Billing Overview & Active Entitlements
@@ -63,8 +89,9 @@ export async function getBillingOverview() {
       created_at: i.created_at,
     }));
 
-    const keyId = process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "";
-    const isCredentialsPresent = Boolean(keyId && process.env.RAZORPAY_KEY_SECRET);
+    const keyId = (process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "").trim();
+    const keySecret = (process.env.RAZORPAY_KEY_SECRET || "").trim();
+    const isCredentialsPresent = Boolean(keyId && keySecret);
 
     const overview: BillingOverviewData = {
       currentPlanCode,
@@ -93,71 +120,115 @@ export async function getBillingOverview() {
 }
 
 /**
- * Server Action: Create Official Razorpay Order via Razorpay Orders API
+ * Server Action: Create Official Razorpay Order via Direct Razorpay REST API
  * (Step 5 of Razorpay Standard Checkout Architecture)
  */
 export async function createRazorpayOrder(
   planCode: "standard" | "multi_branch",
   billingCycle: "monthly" | "annual"
-) {
+): Promise<CreateRazorpayOrderResult> {
   try {
-    console.log(`[BILLING_LOG] PAYMENT_START planCode=${planCode} cycle=${billingCycle}`);
-
     const context = await resolveUserContext();
     if (!context.org) {
-      return { success: false, errorCode: "UNAUTHENTICATED", error: "Organization context required." };
+      return {
+        success: false,
+        errorCode: "UNAUTHENTICATED",
+        provider: "razorpay",
+        error: "Authenticated organization context required.",
+      };
     }
 
     const orgId = context.org.id;
     const planConfig = BILLING_PLANS_CONFIG[planCode];
     const amountInRupees = billingCycle === "annual" ? planConfig.annualPrice : planConfig.monthlyPrice;
-    const amountInPaise = amountInRupees * 100;
+    const amountInPaise = amountInRupees * 100; // Integer subunit for INR
 
-    const keyId = process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    const keyId = (process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "").trim();
+    const keySecret = (process.env.RAZORPAY_KEY_SECRET || "").trim();
 
     if (!keyId || !keySecret) {
-      console.error("[BILLING_LOG] ORDER_CREATE_FAILED error=Razorpay credentials missing in environment");
+      console.error("[RAZORPAY_ORDER_ERROR] Credentials missing on server.");
       return {
         success: false,
         errorCode: "RAZORPAY_CREDENTIALS_MISSING",
-        error: "Razorpay Key ID or Key Secret is missing. Please configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Vercel environment settings.",
+        provider: "razorpay",
+        error: "Razorpay Key ID or Key Secret is missing in Vercel environment settings. Please configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.",
       };
     }
 
-    console.log(`[BILLING_LOG] ORDER_CREATE_START orgId=${orgId} amount=${amountInPaise}`);
+    // Receipt format: <= 40 chars, alphanumeric ASCII only
+    const receipt = `restro_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const mode = keyId.startsWith("rzp_test_") ? "test" : "live";
 
-    // Call official Razorpay Orders API
-    let order: { id: string; amount: number; currency: string; status: string };
-    try {
-      const instance = new Razorpay({
-        key_id: keyId,
-        key_secret: keySecret,
+    console.log("[RAZORPAY_ORDER_REQUEST]", {
+      amount: amountInPaise,
+      currency: "INR",
+      receipt,
+      mode,
+      keyIdPrefix: keyId.substring(0, 8),
+    });
+
+    // Call Razorpay REST API (POST https://api.razorpay.com/v1/orders) using Basic Auth
+    const basicAuth = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+    const response = await fetch("https://api.razorpay.com/v1/orders", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        amount: amountInPaise,
+        currency: "INR",
+        receipt: receipt,
+      }),
+      cache: "no-store",
+    });
+
+    const responseData = await response.json();
+
+    if (!response.ok) {
+      const errObj = responseData.error || {};
+      const providerCode = errObj.code || "BAD_REQUEST_ERROR";
+      const providerDescription = errObj.description || responseData.message || "Razorpay API Order creation failed";
+      const providerField = errObj.field || null;
+      const providerSource = errObj.source || null;
+      const providerStep = errObj.step || null;
+      const providerReason = errObj.reason || null;
+
+      console.error("[RAZORPAY_ORDER_ERROR]", {
+        httpStatus: response.status,
+        providerCode,
+        providerDescription,
+        providerField,
+        providerSource,
+        providerStep,
+        providerReason,
       });
 
-      order = (await instance.orders.create({
-        amount: amountInPaise,
-        currency: planConfig.currency,
-        receipt: `rcpt_${orgId.substring(0, 8)}_${Date.now()}`,
-        notes: {
-          org_id: orgId,
-          plan_code: planCode,
-          billing_cycle: billingCycle,
-        },
-      })) as { id: string; amount: number; currency: string; status: string };
-
-      console.log(`[BILLING_LOG] ORDER_CREATE_SUCCESS orderId=${order.id} keyIdPrefix=${keyId.substring(0, 8)}`);
-    } catch (razorpayErr: unknown) {
-      const errorMsg = razorpayErr instanceof Error ? razorpayErr.message : "Razorpay API Order creation failed";
-      console.error(`[BILLING_LOG] ORDER_CREATE_FAILED error=${errorMsg}`);
       return {
         success: false,
         errorCode: "ORDER_CREATION_FAILED",
-        error: `Razorpay API Order Creation Failed: ${errorMsg}`,
+        provider: "razorpay",
+        providerCode,
+        providerDescription,
+        providerField,
+        providerSource,
+        providerStep,
+        providerReason,
+        httpStatus: response.status,
+        error: `Razorpay API HTTP ${response.status} [${providerCode}]: ${providerDescription}${providerField ? ` (Field: ${providerField})` : ""}`,
       };
     }
 
-    // Log pending invoice attempt in DB
+    const orderId = responseData.id as string;
+    console.log("[RAZORPAY_ORDER_SUCCESS]", {
+      orderId,
+      amount: responseData.amount,
+      currency: responseData.currency,
+      status: responseData.status,
+    });
+
+    // Log pending invoice ONLY after order creation HTTP 200 OK succeeds
     const supabase = await createClient();
     await supabase.from("billing_invoices").insert({
       org_id: orgId,
@@ -170,19 +241,20 @@ export async function createRazorpayOrder(
     return {
       success: true,
       keyId,
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
+      orderId,
+      amount: responseData.amount,
+      currency: responseData.currency,
       planCode,
       orgName: context.org.name,
       userEmail: context.user?.email || "owner@restaurant.com",
     };
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : "Failed to create Razorpay Order";
-    console.error(`[BILLING_LOG] ORDER_CREATE_FAILED error=${errorMsg}`);
+    const errorMsg = err instanceof Error ? err.message : "Network/Server Exception during Razorpay Order creation";
+    console.error("[RAZORPAY_ORDER_EXCEPTION]", errorMsg);
     return {
       success: false,
       errorCode: "ORDER_CREATION_FAILED",
+      provider: "razorpay",
       error: errorMsg,
     };
   }
@@ -199,14 +271,17 @@ export async function verifyRazorpayPaymentSignature(payload: {
   planCode: "standard" | "multi_branch";
 }) {
   try {
-    console.log(`[BILLING_LOG] VERIFICATION_START orderId=${payload.razorpay_order_id} paymentId=${payload.razorpay_payment_id}`);
+    console.log("[BILLING_VERIFICATION_START]", {
+      orderId: payload.razorpay_order_id,
+      paymentId: payload.razorpay_payment_id,
+    });
 
     const context = await resolveUserContext();
     if (!context.org) {
       return { success: false, errorCode: "UNAUTHENTICATED", error: "Organization context required." };
     }
 
-    const razorpaySecret = process.env.RAZORPAY_KEY_SECRET;
+    const razorpaySecret = (process.env.RAZORPAY_KEY_SECRET || "").trim();
     if (!razorpaySecret) {
       return {
         success: false,
@@ -228,7 +303,10 @@ export async function verifyRazorpayPaymentSignature(payload: {
     );
 
     if (!isSignatureValid) {
-      console.error(`[BILLING_LOG] VERIFICATION_FAILED orderId=${payload.razorpay_order_id} error=Invalid HMAC Signature`);
+      console.error("[BILLING_VERIFICATION_FAILED]", {
+        orderId: payload.razorpay_order_id,
+        error: "Invalid HMAC Signature Proof",
+      });
       return {
         success: false,
         errorCode: "SIGNATURE_VERIFICATION_FAILED",
@@ -236,7 +314,7 @@ export async function verifyRazorpayPaymentSignature(payload: {
       };
     }
 
-    console.log(`[BILLING_LOG] VERIFICATION_SUCCESS orderId=${payload.razorpay_order_id}`);
+    console.log("[BILLING_VERIFICATION_SUCCESS]", { orderId: payload.razorpay_order_id });
 
     const supabase = await createClient();
     const orgId = context.org.id;
@@ -277,9 +355,9 @@ export async function verifyRazorpayPaymentSignature(payload: {
       }
     }
 
-    console.log(`[BILLING_LOG] SUBSCRIPTION_UPDATE_SUCCESS orgId=${orgId} planCode=${payload.planCode}`);
+    console.log("[BILLING_SUBSCRIPTION_UPDATED]", { orgId, planCode: payload.planCode });
 
-    // Update pending invoice to PAID
+    // Update invoice status to PAID
     const planConfig = BILLING_PLANS_CONFIG[payload.planCode];
     await supabase.from("billing_invoices").insert({
       org_id: orgId,
@@ -300,7 +378,7 @@ export async function verifyRazorpayPaymentSignature(payload: {
     return { success: true, planCode: payload.planCode };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : "Payment verification failed";
-    console.error(`[BILLING_LOG] VERIFICATION_FAILED error=${errorMsg}`);
+    console.error("[BILLING_VERIFICATION_EXCEPTION]", errorMsg);
     return {
       success: false,
       errorCode: "SUBSCRIPTION_UPDATE_FAILED",
